@@ -1,0 +1,4 @@
+# The .bat files carry a UTF-8 PowerShell payload and must not be touched.
+# Any CRLF/LF normalisation or encoding change breaks the Hebrew and the
+# embedded-script extraction.
+*.bat -text
