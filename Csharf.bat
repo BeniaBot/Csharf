@@ -330,14 +330,18 @@ $pnlColR              = New-Object System.Windows.Forms.FlowLayoutPanel
 $pnlColR.Dock         = 'Fill'
 $pnlColR.FlowDirection = 'TopDown'
 $pnlColR.WrapContents = $false
-$pnlColR.AutoScroll   = $false
+# The tallest column needs ~468px (see the Size comment above) but the form's
+# MinimumSize allows shrinking to 620px total, well under that once title/
+# status/log/exit are subtracted. Without AutoScroll, buttons past the bottom
+# edge are simply clipped with no way to reach them.
+$pnlColR.AutoScroll   = $true
 $pnlColR.Margin       = New-Object System.Windows.Forms.Padding(0)
 
 $pnlColL              = New-Object System.Windows.Forms.FlowLayoutPanel
 $pnlColL.Dock         = 'Fill'
 $pnlColL.FlowDirection = 'TopDown'
 $pnlColL.WrapContents = $false
-$pnlColL.AutoScroll   = $false
+$pnlColL.AutoScroll   = $true
 $pnlColL.Margin       = New-Object System.Windows.Forms.Padding(0)
 
 $pnlBtns.Controls.Add($pnlColR, 0, 0)
@@ -384,6 +388,11 @@ function Set-Busy {
             if ($c -is [System.Windows.Forms.Button]) { $c.Enabled = -not $On }
         }
     }
+    # Exit lives in its own strip (pnlExit), outside the loop above - disable it
+    # explicitly too, or the window can be torn down mid-action (e.g. DISM/SFC
+    # repair, up to ~30 min) while Start-Tool's polling loop still references
+    # its controls.
+    $bExit.Enabled = -not $On
     $form.Cursor = if ($On) { 'WaitCursor' } else { 'Default' }
     [System.Windows.Forms.Application]::DoEvents()
 }
@@ -655,7 +664,12 @@ function Show-RebootCountdown {
     # scope is no longer on the lookup chain - so everything a handler touches
     # is kept at script scope.
     $script:cdLeft      = 15
-    $script:cdCancelled = $false
+    # Default to cancelled. The title-bar X and Alt+F4 call Form.Close()
+    # directly - neither handler below runs, so nothing else would ever set
+    # this flag on that path. Proceeding to reboot must be something the
+    # timer itself opts into by reaching zero, not the fallback for "the
+    # window went away for some unrecognised reason".
+    $script:cdCancelled = $true
     $script:cdDlg       = $dlg
     $script:cdLbl       = $lbl
     $lbl.Text = "המחשב יופעל מחדש בעוד $($script:cdLeft) שניות..."
@@ -665,6 +679,7 @@ function Show-RebootCountdown {
     $script:cdTimer.Add_Tick({
         $script:cdLeft--
         if ($script:cdLeft -le 0) {
+            $script:cdCancelled = $false
             $script:cdTimer.Stop()
             $script:cdDlg.Close()
         } else {
@@ -1063,6 +1078,14 @@ $bExit.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(60,70,60)
 $bExit.Cursor        = 'Hand'
 $bExit.Add_Click({ $form.Close() })
 $pnlExit.Controls.Add($bExit)
+
+# Second layer against the same problem Set-Busy's $bExit.Enabled guards
+# against: the title bar's own close button and Alt+F4 do not go through
+# $bExit at all, so a busy action would otherwise still be torn down under
+# them mid-run.
+$form.Add_FormClosing({
+    if ($script:Busy) { $_.Cancel = $true }
+})
 
 # ============================================================================
 #  Go
