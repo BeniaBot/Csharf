@@ -1637,16 +1637,98 @@ function Action-ReservedStorage {
     }
 }
 
+$CBS_LOG = Join-Path $env:windir 'Logs\CBS\CBS.log'
+
+function Get-CbsLength {
+    # Where the lines SFC is about to write will start in the servicing log.
+    try { return [long](Get-Item -LiteralPath $CBS_LOG -ErrorAction Stop).Length } catch { return [long]-1 }
+}
+
+function Get-SfcVerdict {
+    # sfc /scannow exits 0 whether it found nothing, repaired everything, or
+    # could not repair a file at all - measured on a clean Windows 11 with one
+    # corrupted file in the component store. Up to 2.2 that last case was
+    # reported as "no integrity violations". The real verdict is in the [SR]
+    # lines SFC writes to the servicing log, in English on every language.
+    param([long]$From)
+    $v = @{ Kind = 'unknown'; Repaired = 0; Failed = 0 }
+    $text = $null
+    try {
+        $fs = New-Object System.IO.FileStream($CBS_LOG, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                                              ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        try {
+            # Windows rolls a large log over into CbsPersist_*.log. A file
+            # shorter than before means that happened, and all of it is new.
+            if ($From -ge 0 -and $From -le $fs.Length) { [void]$fs.Seek($From, [System.IO.SeekOrigin]::Begin) }
+            $text = (New-Object System.IO.StreamReader($fs, [Text.Encoding]::Default)).ReadToEnd()
+        } finally { $fs.Dispose() }
+    } catch { return $v }
+    if (-not $text -or $text -notmatch '\[SR\] (Verify complete|Beginning Verify and Repair)') { return $v }
+
+    # A file name as the log prints it: calc.exe, 'calc.exe' or [l:16{8}]"calc.exe".
+    $key = { param($s) ($s -replace '^\[[^\]]*\]', '' -replace '["'']', '').ToLowerInvariant() }
+    # Measured on Windows 11: an unrepairable file gives "Cannot repair member
+    # file [l:8]'calc.exe'" and "Could not reproject corrupted file ...\\calc.exe;
+    # source file in store is also corrupted"; a repaired one gives "Repairing
+    # file \??\C:\WINDOWS\System32\\calc.exe from store". Other builds write
+    # "Repairing corrupted file" and quote names differently - matched too.
+    $failed = @{}
+    foreach ($m in [regex]::Matches($text, '\[SR\] Cannot repair member file (\[l:[^\]]*\]["''][^"''\r\n]+["''])')) { $failed[(& $key $m.Groups[1].Value)] = 1 }
+    foreach ($m in [regex]::Matches($text, '\[SR\] Could not reproject corrupted file [^;\r\n]*\\([^\\;\r\n]+);')) { $failed[(& $key $m.Groups[1].Value)] = 1 }
+    $fixed = @{}
+    foreach ($m in [regex]::Matches($text, '\[SR\] Repairing (?:corrupted )?file [^\r\n]*?\\([^\\\s]+) from store')) {
+        $name = & $key $m.Groups[1].Value
+        if (-not $failed.ContainsKey($name)) { $fixed[$name] = 1 }
+    }
+    $v.Failed   = $failed.Count
+    $v.Repaired = $fixed.Count
+    $v.Kind = if ($v.Failed) { 'failed' } elseif ($v.Repaired) { 'repaired' } else { 'clean' }
+    return $v
+}
+
 function Action-RepairSystem {
     Write-Log 'תיקון קבצי מערכת. הפעולה ארוכה - עד כ-30 דקות. החלון יישאר פעיל.'
     Write-Log 'שלב 1/2: DISM /RestoreHealth ...'
     $d = Start-Tool 'dism.exe' @('/Online','/Cleanup-Image','/RestoreHealth') -Progress
-    if ($d -eq 0) { Write-Ok 'מאגר הרכיבים תוקן.' } else { Write-Warn "DISM הסתיים עם קוד $d." }
+    $hex = '0x{0:X8}' -f $d
+    # These mean DISM found damage and could not get clean copies: it takes
+    # them from Windows Update, so an offline PC lands here (0x800F0915 on a
+    # clean Windows 11 with no network). A healthy store passes offline too.
+    $noSource = $hex -in @('0x800F081F', '0x800F0906', '0x800F0915')
+    if ($d -eq 0) {
+        Write-Ok 'DISM הסתיים בהצלחה. מאגר הרכיבים תקין.'
+    } elseif ($noSource) {
+        Write-Warn 'DISM מצא נזק במאגר הרכיבים, אבל לא הצליח להשיג קבצים תקינים. הוא מוריד אותם מ-Windows Update, ולכן צריך חיבור לאינטרנט.'
+    } elseif ($hex -eq '0x800F0907') {
+        Write-Warn 'DISM מצא נזק במאגר הרכיבים, אבל הגדרות המחשב חוסמות הורדת קבצי תיקון מ-Windows Update.'
+    } else {
+        Write-Warn "DISM הסתיים עם קוד $hex."
+    }
+
     Write-Log 'שלב 2/2: sfc /scannow ...'
+    $from = Get-CbsLength
     $s = Start-Tool 'sfc.exe' @('/scannow') -Progress
-    switch ($s) {
-        0       { Write-Ok 'בדיקת קבצי המערכת הסתיימה. לא נמצאו הפרות שלמות.' }
-        default { Write-Warn "sfc הסתיים עם קוד $s. פרטים ב-CBS.log." }
+    $v = Get-SfcVerdict $from
+    switch ($v.Kind) {
+        'clean' {
+            Write-Ok 'בדיקת קבצי המערכת הסתיימה. לא נמצאו קבצים פגומים.'
+        }
+        'repaired' {
+            if ($v.Repaired -eq 1) { Write-Ok 'נמצא קובץ מערכת פגום, והוא תוקן. כדאי להפעיל מחדש את המחשב.' }
+            else                   { Write-Ok "נמצאו $($v.Repaired) קבצי מערכת פגומים, וכולם תוקנו. כדאי להפעיל מחדש את המחשב." }
+        }
+        'failed' {
+            if ($v.Failed -eq 1) { Write-Err 'נמצא קובץ מערכת פגום ש-SFC לא הצליח לתקן.' }
+            else                 { Write-Err "נמצאו $($v.Failed) קבצי מערכת פגומים ש-SFC לא הצליח לתקן." }
+            if ($v.Repaired) { Write-Log "קבצים אחרים ($($v.Repaired)) כן תוקנו." }
+            if ($d -ne 0) { Write-Log 'הסיבה: גם העותק השמור במחשב פגום. חברו את המחשב לאינטרנט והריצו שוב את התיקון - DISM יוריד קבצים תקינים.' }
+            else          { Write-Log 'כדאי להפעיל מחדש את המחשב ולהריץ שוב את התיקון.' }
+            Write-Log "הפרטים המלאים: $CBS_LOG"
+        }
+        default {
+            if ($s -eq 0) { Write-Warn "SFC הסתיים, אבל לא הצלחתי לקרוא את התוצאה שלו. הפרטים ב-$CBS_LOG" }
+            else          { Write-Warn "sfc הסתיים עם קוד $s. הפרטים ב-$CBS_LOG" }
+        }
     }
 }
 
