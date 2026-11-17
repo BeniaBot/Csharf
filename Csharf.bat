@@ -51,7 +51,7 @@ exit /b 1
 #  Csharf - GUI edition
 # ============================================================================
 
-$CSHARF_VERSION = '2.4'
+$CSHARF_VERSION = '2.5'
 
 $ErrorActionPreference = 'Continue'
 
@@ -387,25 +387,50 @@ function Clear-FolderContents {
     # Deletes the *contents* only. The old scripts did `rd /s /q %TEMP%` and
     # `rd /s /q C:\Windows\Temp` then re-created the folders - that wipes the
     # NTFS ACLs on C:\Windows\Temp and can break Windows services.
-    param([string]$Path)
+    #
+    # Only what nobody has touched for $MinAgeHours - the usual standard for
+    # temp cleaners (24 hours is the best-known one's default; Windows' own
+    # Disk Cleanup waits a week). Up to 2.4 everything went at once, also the
+    # file a running program wrote a minute ago. "Touched" is the newer of
+    # creation and last write: an installer that unpacks a file keeps its old
+    # write time, but the creation time is now.
+    # Junctions and symbolic links are skipped, never followed. Deletion goes
+    # through .NET, which takes the 8.3 %TEMP% of a user name in Hebrew.
+    param([string]$Path, [double]$MinAgeHours = 24)
     $freed = 0
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-    Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        Test-Stop          # outside the try below, which swallows everything
-        try {
-            $size = 0
-            if ($_.PSIsContainer) {
-                $m = Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -File -ErrorAction SilentlyContinue |
-                     Measure-Object -Property Length -Sum
-                if ($m) { $size = [double]$m.Sum }
-            } else {
-                $size = [double]$_.Length
+    $cutoff = (Get-Date).AddHours(-$MinAgeHours)
+    $isOld  = { param($i) $t = $i.LastWriteTime; if ($i.CreationTime -gt $t) { $t = $i.CreationTime }; $t -lt $cutoff }
+    $dirs   = New-Object System.Collections.Generic.List[object]
+    $todo   = New-Object System.Collections.Generic.Stack[string]
+    $todo.Push($Path)
+    while ($todo.Count) {
+        foreach ($i in @(Get-ChildItem -LiteralPath $todo.Pop() -Force -ErrorAction SilentlyContinue)) {
+            Test-Stop
+            if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if ($i.PSIsContainer) {
+                # Its age is read now: deleting what is inside makes it new.
+                $dirs.Add(@($i.FullName, (& $isOld $i)))
+                $todo.Push($i.FullName)
+                continue
             }
-            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
-            $freed += $size
-        } catch {
-            # In use / locked - skip silently, that is normal.
+            if (-not (& $isOld $i)) { continue }
+            try {
+                if ($i.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $i.Attributes = $i.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+                $size = [double]$i.Length
+                [System.IO.File]::Delete($i.FullName)
+                $freed += $size
+            } catch {
+                # In use / locked - skip silently, that is normal.
+            }
         }
+    }
+    # Old folders that are empty now, deepest first. Anything with a file left
+    # inside fails the non-recursive delete and stays.
+    for ($k = $dirs.Count - 1; $k -ge 0; $k--) {
+        if ($dirs[$k][1]) { try { [System.IO.Directory]::Delete($dirs[$k][0], $false) } catch { } }
     }
     return $freed
 }
@@ -1069,7 +1094,7 @@ function Confirm-Action {
 function Action-Cleanup {
     if (-not (Confirm-Action -Title 'אזהרה - פינוי שטח' -Lines @(
         'הפעולה תמחק:'
-        '•  קבצים זמניים של Windows ושל התוכנות'
+        '•  קבצים זמניים של Windows ושל התוכנות (בני יותר מ-24 שעות)'
         '•  את כל מה שנמצא בסל המיחזור'
         '•  קבצי עדכונים ישנים, יומני התקנה ודוחות שגיאה'
         ''
@@ -1143,7 +1168,7 @@ function Action-Cleanup {
         if ($t -match '^[A-Za-z]:$') { continue }
         $freed += Clear-FolderContents $t
     }
-    Write-Ok ("תיקיות זמניות נוקו ({0}). קבצים בשימוש דולגו." -f (Format-Size $freed))
+    Write-Ok ("תיקיות זמניות נוקו ({0}). קבצים מה-24 השעות האחרונות וקבצים בשימוש נשארו." -f (Format-Size $freed))
 
     # Clear-RecycleBin needs PS 5.0; fall back to the raw folder on older hosts.
     if (Get-Command 'Clear-RecycleBin' -ErrorAction SilentlyContinue) {

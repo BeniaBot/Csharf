@@ -142,7 +142,7 @@ function Item { param([string]$n, [string]$text)
 }
 function Rule { A ('echo ' + ([string][char]0x2550) * 43) }
 
-$VERSION = '2.4'
+$VERSION = '2.5'
 $GH = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $GB = '381b4222-f694-41f0-9685-ff5bb260df2e'
 $GU = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
@@ -413,7 +413,7 @@ Rule
 A ('echo ' + (' ' * [int]((43 - (Vis 'אזהרה חשובה').Length) / 2)) + (Vis 'אזהרה חשובה'))
 Rule
 EB
-E 'תהליך זה ימחק קבצים זמניים, ירוקן את סל המיחזור ועוד.'
+E 'תהליך זה ימחק קבצים זמניים בני יותר מ-24 שעות, ירוקן את סל המיחזור ועוד.'
 E 'לביטול יש לסגור את התוכנה - ללחוץ על X.'
 EB
 A 'for /l %%i in (6,-1,1) do ('
@@ -461,8 +461,26 @@ A 'if not defined CD_T goto :eof'
 A 'if not "!CD_T:~1,2!"==":\" goto :eof'
 A 'if "!CD_T:~3!"=="" goto :eof'
 A 'if not exist "!CD_T!\" goto :eof'
-A 'del /s /f /q "!CD_T!\*.*" >nul 2>&1'
-A 'for /d %%d in ("!CD_T!\*") do rd /s /q "%%d" >nul 2>&1'
+A 'rem Only files nobody has changed for at least a day - the usual standard'
+A 'rem for temp cleaners (24 hours in the best-known one; Windows'' own Disk'
+A 'rem Cleanup waits a week). Up to 2.4 everything went at once, also what a'
+A 'rem running program wrote a minute ago. forfiles counts whole days by the'
+A 'rem last-write date: /d -2 is "the day before yesterday or earlier", so'
+A 'rem every file it takes is at least 24 hours old.'
+A 'call :CLEAN_TREE "!CD_T!"'
+A 'goto :eof'
+A ''
+A 'rem One folder at a time, never "forfiles /s": that walked into a junction'
+A 'rem inside the temp folder and deleted an old file OUTSIDE it (caught on a'
+A 'rem clean Windows 11 before release). "dir /a:d-l" lists the subfolders'
+A 'rem that are not links; each is cleaned the same way, then removed if empty'
+A 'rem (rd without /s keeps any that still hold something).'
+A ':CLEAN_TREE'
+A 'forfiles /p "%~1" /m * /d -2 /c "cmd /c if @isdir==FALSE del /f /q @path" >nul 2>&1'
+A 'for /f "delims=" %%s in (''dir /a:d-l /b "%~1" 2^>nul'') do ('
+A '  call :CLEAN_TREE "%~1\%%s"'
+A '  rd "%~1\%%s" >nul 2>&1'
+A ')'
 A 'goto :eof'
 A ''
 
