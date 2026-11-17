@@ -420,20 +420,60 @@ function Start-Tool {
     #
     # -NoStop: for tools that must never be cut off half way (the edition
     # change). The window still stays alive; it just offers no stop button.
-    param([string]$FilePath, [string[]]$ArgumentList, [switch]$NoStop)
+    #
+    # -Progress: for console tools that print a percentage (DISM, SFC). Their
+    # output is read on a second thread and the latest figure is shown on the
+    # bottom button next to the clock - half an hour of a bare clock looks
+    # exactly like a hang. Only digits and "%" are looked at: DISM writes in
+    # the console code page and SFC in UTF-16, and dropping the zero bytes
+    # leaves the ASCII digits of both intact. The integer part only, since
+    # some locales print "17,4%".
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$NoStop, [switch]$Progress)
     Test-Stop
+    $reader = $null; $readerHandle = $null; $sync = $null
     try {
-        $p = Start-Process -FilePath $FilePath -ArgumentList (Join-ProcessArguments $ArgumentList) `
-                           -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if ($Progress) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName               = $FilePath
+            $psi.Arguments              = Join-ProcessArguments $ArgumentList
+            $psi.UseShellExecute        = $false
+            $psi.CreateNoWindow         = $true
+            $psi.RedirectStandardOutput = $true
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $sync = [hashtable]::Synchronized(@{ Percent = $null })
+            $reader = [powershell]::Create()
+            [void]$reader.AddScript({
+                param($stream, $sync)
+                $buf  = New-Object byte[] 4096
+                $tail = ''
+                while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $sb = New-Object System.Text.StringBuilder
+                    for ($i = 0; $i -lt $n; $i++) { if ($buf[$i] -ne 0) { [void]$sb.Append([char]$buf[$i]) } }
+                    $tail = $tail + $sb.ToString()
+                    if ($tail.Length -gt 400) { $tail = $tail.Substring($tail.Length - 400) }
+                    $m = [regex]::Matches($tail, '(\d{1,3})(?:[.,]\d+)?\s?%')
+                    if ($m.Count -gt 0) {
+                        $v = [int]$m[$m.Count - 1].Groups[1].Value
+                        if ($v -le 100) { $sync.Percent = $v }
+                    }
+                }
+            }).AddArgument($p.StandardOutput.BaseStream).AddArgument($sync)
+            $readerHandle = $reader.BeginInvoke()
+        } else {
+            $p = Start-Process -FilePath $FilePath -ArgumentList (Join-ProcessArguments $ArgumentList) `
+                               -WindowStyle Hidden -PassThru -ErrorAction Stop
+        }
         # Touch the handle now. A Process object that never opened one while
         # the process was alive reports an empty ExitCode afterwards.
         $null = $p.Handle
     } catch {
+        if ($reader) { $reader.Dispose() }
         return $null
     }
     $script:CanStop = -not $NoStop
     try {
         while (-not $p.HasExited) {
+            if ($sync) { $script:ToolProgress = $sync.Percent }
             Update-ExitButton
             [System.Windows.Forms.Application]::DoEvents()
             if ($script:StopRequested -and -not $NoStop) {
@@ -444,7 +484,13 @@ function Start-Tool {
             Start-Sleep -Milliseconds 40
         }
     } finally {
-        $script:CanStop = $false
+        $script:CanStop      = $false
+        $script:ToolProgress = $null
+        if ($reader) {
+            # The stream ends with the process; give the reader a moment.
+            if ($readerHandle) { [void]$readerHandle.AsyncWaitHandle.WaitOne(2000) }
+            $reader.Dispose()
+        }
     }
     return $p.ExitCode
 }
@@ -717,6 +763,7 @@ $script:BusySince     = $null
 $script:CanStop       = $false   # an external tool is running and may be killed
 $script:StopRequested = $false
 $script:CloseAfter    = $false   # the user asked to close while an action ran
+$script:ToolProgress  = $null    # last percentage a -Progress tool printed
 $script:MenuButtons   = New-Object System.Collections.Generic.List[System.Windows.Forms.Button]
 
 function Update-ExitButton {
@@ -728,6 +775,7 @@ function Update-ExitButton {
     } else {
         $el    = (Get-Date) - $script:BusySince
         $clock = '{0:00}:{1:00}' -f [int][Math]::Floor($el.TotalMinutes), $el.Seconds
+        if ($null -ne $script:ToolProgress) { $clock = "$clock   ·   $($script:ToolProgress)%" }
         if ($script:StopRequested) { $text = "עוצר...   $clock";            $color = $C_DIM;  $enabled = $false }
         elseif ($script:CanStop)   { $text = "עצירת הפעולה   $clock";      $color = $C_WARN; $enabled = $true  }
         else                       { $text = "פועל, נא להמתין...   $clock"; $color = $C_DIM;  $enabled = $false }
@@ -1092,7 +1140,7 @@ function Action-Cleanup {
     }
 
     Write-Log 'מנקה רכיבי Windows ישנים (DISM)... זה עשוי לקחת מספר דקות.'
-    $dc = Start-Tool 'dism.exe' @('/online','/cleanup-image','/startcomponentcleanup')
+    $dc = Start-Tool 'dism.exe' @('/online','/cleanup-image','/startcomponentcleanup') -Progress
     if ($dc -eq 0)          { Write-Ok 'ניקוי רכיבי Windows הושלם.' }
     elseif ($null -eq $dc)  { Write-Warn 'DISM נכשל - ממשיך.' }
     else                    { Write-Warn "DISM הסתיים עם קוד $dc." }
@@ -1484,10 +1532,10 @@ function Action-ReservedStorage {
 function Action-RepairSystem {
     Write-Log 'תיקון קבצי מערכת. הפעולה ארוכה - עד כ-30 דקות. החלון יישאר פעיל.'
     Write-Log 'שלב 1/2: DISM /RestoreHealth ...'
-    $d = Start-Tool 'dism.exe' @('/Online','/Cleanup-Image','/RestoreHealth')
+    $d = Start-Tool 'dism.exe' @('/Online','/Cleanup-Image','/RestoreHealth') -Progress
     if ($d -eq 0) { Write-Ok 'מאגר הרכיבים תוקן.' } else { Write-Warn "DISM הסתיים עם קוד $d." }
     Write-Log 'שלב 2/2: sfc /scannow ...'
-    $s = Start-Tool 'sfc.exe' @('/scannow')
+    $s = Start-Tool 'sfc.exe' @('/scannow') -Progress
     switch ($s) {
         0       { Write-Ok 'בדיקת קבצי המערכת הסתיימה. לא נמצאו הפרות שלמות.' }
         default { Write-Warn "sfc הסתיים עם קוד $s. פרטים ב-CBS.log." }
