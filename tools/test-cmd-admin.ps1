@@ -70,7 +70,19 @@ Check ($rc -eq 10 -and $ok) "CREATE_SHORTCUT -> code $rc, $desc"
 
 # --- cleanup, answering 2 (keep) to the Windows.old question
 $tmpU = Join-Path $env:LOCALAPPDATA 'Temp'; $tmpW = Join-Path $env:SystemRoot 'Temp'
-foreach ($d in $tmpU, $tmpW) { Set-Content -LiteralPath (Join-Path $d 'csharf-cmd-test.txt') -Value 'x' }
+# Old files (3 days) must go, new ones stay: the cleanup takes only what is at
+# least a day old. A junction in the temp folder points at a canary that is
+# old too - it must survive: the cleanup may not follow links.
+foreach ($d in $tmpU, $tmpW) {
+    Set-Content -LiteralPath (Join-Path $d 'csharf-cmd-test.txt') -Value 'x'
+    $it = Get-Item -LiteralPath (Join-Path $d 'csharf-cmd-test.txt'); $it.CreationTime = (Get-Date).AddDays(-3); $it.LastWriteTime = (Get-Date).AddDays(-3)
+    Set-Content -LiteralPath (Join-Path $d 'csharf-cmd-new.txt') -Value 'x'
+}
+$canaryDir = Join-Path $OutDir 'canary'
+New-Item -ItemType Directory -Force -Path $canaryDir | Out-Null
+Set-Content -LiteralPath (Join-Path $canaryDir 'canary.txt') -Value 'must survive'
+$it = Get-Item -LiteralPath (Join-Path $canaryDir 'canary.txt'); $it.CreationTime = (Get-Date).AddDays(-3); $it.LastWriteTime = (Get-Date).AddDays(-3)
+cmd /c "mklink /J ""$tmpU\csharf-link"" ""$canaryDir""" | Out-Null
 $winOld = Join-Path $env:SystemDrive 'Windows.old'
 New-Item -ItemType Directory -Force -Path $winOld | Out-Null
 Set-Content -LiteralPath (Join-Path $winOld 'csharf-keep.txt') -Value 'keep me'
@@ -78,7 +90,11 @@ $rc = Run ':DISK_CLEANUP' '2'
 $said = [IO.File]::ReadAllText((Join-Path $OutDir 'out-DISK_CLEANUP.txt'), $cp)
 Check ($said -match 'Windows\.old') 'DISK_CLEANUP asked about Windows.old'
 Check (Test-Path -LiteralPath (Join-Path $winOld 'csharf-keep.txt')) "DISK_CLEANUP kept Windows.old on answer 2 (code $rc)"
-foreach ($d in $tmpU, $tmpW) { Check (-not (Test-Path -LiteralPath (Join-Path $d 'csharf-cmd-test.txt'))) "DISK_CLEANUP emptied $d" }
+foreach ($d in $tmpU, $tmpW) {
+    Check (-not (Test-Path -LiteralPath (Join-Path $d 'csharf-cmd-test.txt'))) "DISK_CLEANUP deleted a 3-day-old file in $d"
+    Check (Test-Path -LiteralPath (Join-Path $d 'csharf-cmd-new.txt')) "DISK_CLEANUP kept a new file in $d"
+}
+Check (Test-Path -LiteralPath (Join-Path $canaryDir 'canary.txt')) 'DISK_CLEANUP did not follow a junction out of the temp folder'
 $vc = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
 $on = @(Get-ChildItem -LiteralPath $vc | Where-Object { (Get-ItemProperty -LiteralPath $_.PSPath).StateFlags0001 -eq 2 } | ForEach-Object { $_.PSChildName })
 Check (-not ($on -contains 'Previous Installations')) 'DISK_CLEANUP: "Previous Installations" not ticked'

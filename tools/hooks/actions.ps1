@@ -187,10 +187,17 @@ foreach ($d in $tmpU, $tmpW) {
     foreach ($age in 'old', 'new') {
         $p = Join-Path $d "csharf-test-$age.txt"
         Set-Content -LiteralPath $p -Value ('x' * 4096)
-        if ($age -eq 'old') { (Get-Item -LiteralPath $p).LastWriteTime = (Get-Date).AddDays(-10); (Get-Item -LiteralPath $p).LastAccessTime = (Get-Date).AddDays(-10) }
+        if ($age -eq 'old') { $it = Get-Item -LiteralPath $p; $it.CreationTime = (Get-Date).AddDays(-10); $it.LastWriteTime = (Get-Date).AddDays(-10) }
         $files["$d|$age"] = $p
     }
 }
+# A junction in the temp folder pointing at an old canary outside it: the
+# cleanup may skip it, never follow it.
+$canaryDir = Join-Path $out 'canary'
+New-Item -ItemType Directory -Force -Path $canaryDir | Out-Null
+Set-Content -LiteralPath (Join-Path $canaryDir 'canary.txt') -Value 'must survive'
+$it = Get-Item -LiteralPath (Join-Path $canaryDir 'canary.txt'); $it.CreationTime = (Get-Date).AddDays(-10); $it.LastWriteTime = (Get-Date).AddDays(-10)
+cmd /c "mklink /J ""$tmpU\csharf-link"" ""$canaryDir""" | Out-Null
 $lockedPath = Join-Path $tmpU 'csharf-test-locked.txt'
 Set-Content -LiteralPath $lockedPath -Value 'locked'
 $lock = [IO.File]::Open($lockedPath, 'Open', 'Read', 'None')
@@ -211,7 +218,8 @@ $lock.Dispose()
 Check ($script:Asked -contains 'התקנה קודמת של Windows') 'cleanup: asked separately about Windows.old'
 Check (Test-Path -LiteralPath (Join-Path $winOld 'csharf-keep.txt')) 'cleanup: Windows.old kept when the answer was no'
 Check (Test-Path -LiteralPath $lockedPath) 'cleanup: a file in use was skipped, not forced'
-foreach ($k in $files.Keys) { Note ("temp file {0}: {1}" -f $k, $(if (Test-Path -LiteralPath $files[$k]) { 'kept' } else { 'deleted' })) }
+Check (Test-Path -LiteralPath (Join-Path $canaryDir 'canary.txt')) 'cleanup: did not follow a junction out of the temp folder'
+foreach ($k in $files.Keys) { $kept = Test-Path -LiteralPath $files[$k]; if ($k -match '\|old$') { Check (-not $kept) "cleanup: temp file older than a day deleted ($k)" } else { Check $kept "cleanup: temp file from the last 24 hours kept ($k)" } }
 Check ((Get-RecycleCount) -eq 0) "cleanup: recycle bin empty ($(Get-RecycleCount))"
 $vc = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
 $on = @(Get-ChildItem -LiteralPath $vc | Where-Object { (Get-ItemProperty -LiteralPath $_.PSPath).StateFlags0001 -eq 2 } | ForEach-Object { $_.PSChildName })

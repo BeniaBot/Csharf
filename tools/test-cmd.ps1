@@ -129,6 +129,8 @@ try {
     Set-Content -LiteralPath (Join-Path $root 'keep.txt') -Value 'x'
     Set-Content -LiteralPath (Join-Path $root 'Temp\a.tmp') -Value 'x'
     Set-Content -LiteralPath (Join-Path $root 'Temp\sub\b.tmp') -Value 'x'
+    # CLEAN_DIR takes only files at least a day old (forfiles /d -2)
+    foreach ($n in 'Temp\a.tmp', 'Temp\sub\b.tmp') { $it = Get-Item -LiteralPath (Join-Path $root $n); $it.CreationTime = (Get-Date).AddDays(-3); $it.LastWriteTime = (Get-Date).AddDays(-3) }
     $letter = $null
     foreach ($l in 'Q','R','S','T','U','V','W') { if (-not (Test-Path "${l}:\")) { $letter = $l; break } }
     cmd /c "subst ${letter}: `"$root`"" | Out-Null
