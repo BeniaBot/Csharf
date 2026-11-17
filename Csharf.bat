@@ -1847,7 +1847,23 @@ $form.Add_FormClosing({
 #  Go
 # ============================================================================
 
+function Fit-ToScreen {
+    # Safety net once the window really exists. The size above is worked out
+    # from the frame Windows reports before the window is made, and some
+    # sessions (no visual styles, a remote or service desktop) draw a taller
+    # frame than they report. Whatever the cause, the window never ends up
+    # taller or wider than the screen: it is cut to fit - the log row gives
+    # way first, then the menu scrolls - and moved back inside.
+    $wa = $script:WorkArea
+    if ($form.Height -gt $wa.Height) { $form.Height = $wa.Height }
+    if ($form.Width  -gt $wa.Width)  { $form.Width  = $wa.Width }
+    $x = [Math]::Min([Math]::Max($form.Left, $wa.Left), $wa.Right  - $form.Width)
+    $y = [Math]::Min([Math]::Max($form.Top,  $wa.Top),  $wa.Bottom - $form.Height)
+    if ($x -ne $form.Left -or $y -ne $form.Top) { $form.Location = New-Object System.Drawing.Point($x, $y) }
+}
+
 $form.Add_Shown({
+    Fit-ToScreen
     # Started from a hidden background process, the window does not always
     # get the foreground on its own.
     $form.Activate()

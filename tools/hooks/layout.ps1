@@ -23,6 +23,8 @@ $cc = [System.Windows.Forms.Control].GetMethod('CreateControl',
         [System.Reflection.BindingFlags]'NonPublic,Instance', $null, [Type[]]@([bool]), $null)
 [void]$cc.Invoke($form, @($true))
 $form.PerformLayout()
+# what the window does once it is shown (2.2 and up)
+if (Get-Command Fit-ToScreen -ErrorAction SilentlyContinue) { Fit-ToScreen; $form.PerformLayout() }
 try { Update-Status } catch { }
 try { Write-Log 'layout test' } catch { }
 [System.Windows.Forms.Application]::DoEvents()
