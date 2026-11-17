@@ -74,6 +74,7 @@ $origin = $form.PointToScreen([System.Drawing.Point]::Empty)
 $winOrg = New-Object System.Drawing.Point($form.Left, $form.Top)
 $offX = $origin.X - $form.Left; $offY = $origin.Y - $form.Top
 $leftHeavy = 0; $measured = 0
+$maxRight = [int](30 * $(if ($script:UiScale) { $script:UiScale } else { 1 }))
 foreach ($b in $buttons) {
     if ($b -eq $bExit) { continue }   # centred on purpose
     $r = $b.RectangleToScreen($b.ClientRectangle)
@@ -84,15 +85,17 @@ foreach ($b in $buttons) {
     for ($x = $x0 + 3; $x -lt $x0 + $r.Width - 3; $x++) {
         for ($y = $y0 + [int]($r.Height * 0.3); $y -lt $y0 + [int]($r.Height * 0.7); $y += 2) {
             $c = $bmp.GetPixel($x, $y)
-            if ([Math]::Abs($c.R - $bg.R) + [Math]::Abs($c.G - $bg.G) + [Math]::Abs($c.B - $bg.B) -gt 120) {
+            if ([Math]::Abs($c.R - $bg.R) + [Math]::Abs($c.G - $bg.G) + [Math]::Abs($c.B - $bg.B) -gt 45) {
                 if ($null -eq $minX) { $minX = $x }; $maxX = $x; break
             }
         }
     }
-    if ($null -eq $minX) { continue }
+    if ($null -eq $minX) { $rep.Add("        no ink found in: $($b.Text) (enabled: $($b.Enabled))"); continue }
     $measured++
     $leftGap = $minX - $x0; $rightGap = ($x0 + $r.Width) - $maxX
-    if ($rightGap -gt $leftGap) { $leftHeavy++ }
+    # Hugs the right edge: the right margin is the smaller one, or - for a
+    # caption that fills the whole button - no wider than the padding.
+    if ($rightGap -gt $leftGap -and $rightGap -gt $maxRight) { $leftHeavy++; $rep.Add("        not against the right edge (left $leftGap px, right $rightGap px): $($b.Text)") }
 }
 Check ($measured -ge 18 -and $leftHeavy -eq 0) "captions against the right edge: $($measured - $leftHeavy) of $measured"
 

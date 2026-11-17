@@ -658,7 +658,58 @@ function Update-Status {
         "מערכת ההפעלה:  $($ed.ProductName) $($ed.Display)  ·  $($ed.EditionID)"
         "מצב תרדמה:  $hib          מקום פנוי בכונן המערכת:  $free"
     ) -join [Environment]::NewLine
+    Update-Toggles
     [System.Windows.Forms.Application]::DoEvents()
+}
+
+# ---------------------------------------------------------- toggle buttons ---
+# A switch-like button says what pressing it will DO, given the PC's state
+# right now; a button that has nothing to do is greyed out and says why.
+# Every caption a button can ever show is listed here, so the column width is
+# measured against the longest of them.
+$TOGGLE_TEXT = @{
+    HibOffDo   = 'השבתת מצב תרדמה  (מחיקת hiberfil.sys)'
+    HibOffDone = 'מצב תרדמה כבר מושבת'
+    HibOnDo    = 'הפעלת מצב תרדמה מחדש'
+    HibOnDone  = 'מצב תרדמה כבר פעיל'
+    MenuToOld  = 'תפריט ההקשר המלא והישן  (Windows 11)'
+    MenuToNew  = 'החזרת תפריט ההקשר המקוצר  (Windows 11)'
+    MenuNA     = 'תפריט ההקשר הישן - רק ב-Windows 11'
+    ExtShow    = 'הצגת סיומות וקבצים מוסתרים'
+    ExtHide    = 'הסתרת סיומות וקבצים מוסתרים'
+}
+$script:KeyButtons = @{}
+
+function Test-ClassicMenu {
+    return (Test-Path -LiteralPath 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32')
+}
+function Test-ExtensionsShown {
+    try {
+        $k = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -ErrorAction Stop
+        return ($k.HideFileExt -eq 0 -and $k.Hidden -eq 1)
+    } catch { return $false }
+}
+
+function Set-Toggle {
+    param([string]$Key, [string]$Text, [bool]$Applicable)
+    $b = $script:KeyButtons[$Key]
+    if (-not $b) { return }
+    if ($b.Text -ne $Text) { $b.Text = $Text }
+    # The Tag survives Set-Busy, which re-enables only what is applicable.
+    $b.Tag = if ($Applicable) { $null } else { 'na' }
+    $b.Enabled = $Applicable -and -not $script:Busy
+}
+
+function Update-Toggles {
+    $hib = Get-HibernateEnabled
+    Set-Toggle 'HibOff' $(if ($hib) { $TOGGLE_TEXT.HibOffDo } else { $TOGGLE_TEXT.HibOffDone }) $hib
+    Set-Toggle 'HibOn'  $(if ($hib) { $TOGGLE_TEXT.HibOnDone } else { $TOGGLE_TEXT.HibOnDo }) (-not $hib)
+    if ((Get-BuildNumber) -lt 22000) {
+        Set-Toggle 'Menu' $TOGGLE_TEXT.MenuNA $false
+    } else {
+        Set-Toggle 'Menu' $(if (Test-ClassicMenu) { $TOGGLE_TEXT.MenuToNew } else { $TOGGLE_TEXT.MenuToOld }) $true
+    }
+    Set-Toggle 'Ext' $(if (Test-ExtensionsShown) { $TOGGLE_TEXT.ExtHide } else { $TOGGLE_TEXT.ExtShow }) $true
 }
 
 $script:Busy          = $false
@@ -694,7 +745,7 @@ function Set-Busy {
     $script:StopRequested = $false
     $script:CanStop       = $false
     if ($On) { $script:BusySince = Get-Date }
-    foreach ($b in $script:MenuButtons) { $b.Enabled = -not $On }
+    foreach ($b in $script:MenuButtons) { $b.Enabled = (-not $On) -and ($b.Tag -ne 'na') }
     Update-ExitButton
     $form.Cursor = if ($On) { 'WaitCursor' } else { 'Default' }
     [System.Windows.Forms.Application]::DoEvents()
@@ -733,12 +784,25 @@ function Use-OwnScheme {
     if ((Test-Scheme $Guid) -and (Set-ActiveScheme $Guid)) { return 'existing' }
     if (Test-Scheme $Guid) { & powercfg.exe /delete $Guid 2>&1 | Out-Null }
     if (-not (Copy-Scheme $From $Guid $Name $Description)) { return $null }
+    # Each tuning entry is @('AC'|'DC'|'BOTH', subgroup, setting, value).
     foreach ($t in $Tune) {
-        & powercfg.exe -setacvalueindex $Guid $t[0] $t[1] $t[2] 2>&1 | Out-Null
-        & powercfg.exe -setdcvalueindex $Guid $t[0] $t[1] $t[2] 2>&1 | Out-Null
+        if ($t[0] -ne 'DC') { & powercfg.exe -setacvalueindex $Guid $t[1] $t[2] $t[3] 2>&1 | Out-Null }
+        if ($t[0] -ne 'AC') { & powercfg.exe -setdcvalueindex $Guid $t[1] $t[2] $t[3] 2>&1 | Out-Null }
     }
     if (Set-ActiveScheme $Guid) { return 'created' }
     return $null
+}
+
+function Set-ProcessorIdleAllowed {
+    # Processor idle states stay ON, on mains and on battery alike. 2.1 turned
+    # them off in its stand-in Ultimate plan: the CPU then never rests - hot,
+    # loud, a drained battery, and often LESS speed, because a core that never
+    # idles leaves no thermal room for turbo. Also repairs a plan 2.1 made.
+    param([string]$Guid)
+    & powercfg.exe -setacvalueindex $Guid SUB_PROCESSOR IDLEDISABLE 0 2>&1 | Out-Null
+    & powercfg.exe -setdcvalueindex $Guid SUB_PROCESSOR IDLEDISABLE 0 2>&1 | Out-Null
+    # Changed values of the ACTIVE plan only apply once it is set active again.
+    [void](Set-ActiveScheme $Guid)
 }
 
 function Action-HighPerf {
@@ -755,7 +819,7 @@ function Action-HighPerf {
         $r = Use-OwnScheme $GUID_CS_HIGH $GUID_HIGHPERF 'High Performance (Csharf)' 'ביצועים גבוהים - Csharf'
     } else {
         $r = Use-OwnScheme $GUID_CS_HIGH $GUID_BALANCED 'High Performance (Csharf)' 'ביצועים גבוהים - Csharf' `
-                           -Tune @(,@('SUB_PROCESSOR','PROCTHROTTLEMIN',100))
+                           -Tune @(,@('AC','SUB_PROCESSOR','PROCTHROTTLEMIN',100))
     }
     if ($r) { Write-Ok 'מצב ביצועים גבוהים הופעל (סכימה מותאמת, כי המחשב חוסם את הרגילה).' }
     else    { Write-Err 'לא הצלחתי להפעיל מצב ביצועים גבוהים במחשב הזה.' }
@@ -769,24 +833,30 @@ function Action-UltraPerf {
     Write-Log 'מנסה להפעיל את הסכימה הרשמית של Windows...'
     $r = Use-OwnScheme $GUID_CS_ULT $GUID_ULTIMATE 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf'
     if ($r) {
+        Set-ProcessorIdleAllowed $GUID_CS_ULT
         Write-Ok 'מצב ביצועים אולטימטיביים הופעל.'
         return
     }
 
     # Home editions and Modern Standby laptops block the template. Build an
     # equivalent from High Performance (or Balanced, where that is missing).
+    # Full speed applies on mains power only; on battery the plan keeps the
+    # base plan's own values, so a laptop does not cook itself in a bag.
+    # The display timeout is left alone everywhere.
     Write-Warn 'המחשב חוסם את הסכימה הרשמית - בונה סכימה מקבילה.'
     $base = if (Test-Scheme $GUID_HIGHPERF) { $GUID_HIGHPERF } else { $GUID_BALANCED }
     $r = Use-OwnScheme $GUID_CS_ULT $base 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf' -Tune @(
-        @('SUB_PROCESSOR','PROCTHROTTLEMIN',100),
-        @('SUB_PROCESSOR','PROCTHROTTLEMAX',100),
-        @('SUB_PROCESSOR','IDLEDISABLE',1),
-        @('SUB_DISK','DISKIDLE',0),
-        @('SUB_SLEEP','STANDBYIDLE',0),
-        @('SUB_VIDEO','VIDEOIDLE',0)
+        @('AC', 'SUB_PROCESSOR', 'PROCTHROTTLEMIN', 100),
+        @('AC', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', 100),
+        @('AC', 'SUB_DISK',      'DISKIDLE',        0),
+        @('AC', 'SUB_SLEEP',     'STANDBYIDLE',     0)
     )
-    if ($r) { Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה מקבילה).' }
-    else    { Write-Err 'לא הצלחתי להפעיל מצב ביצועים אולטימטיביים במחשב הזה.' }
+    if ($r) {
+        Set-ProcessorIdleAllowed $GUID_CS_ULT
+        Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה מקבילה; מהירות מלאה כשהמחשב מחובר לחשמל).'
+    } else {
+        Write-Err 'לא הצלחתי להפעיל מצב ביצועים אולטימטיביים במחשב הזה.'
+    }
 }
 
 function Get-LeftoverSchemes {
@@ -1200,12 +1270,31 @@ function New-DesktopShortcut {
 }
 
 function Restart-Explorer {
-    Write-Log 'מפעיל מחדש את סייר הקבצים כדי להחיל את השינוי...'
-    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
-        Start-Process explorer.exe
+    # Asked first: the desktop and taskbar blink away and every open folder
+    # window closes - not something to spring on anyone mid-work.
+    if (-not (Confirm-Action -Title 'הפעלה מחדש של סייר הקבצים' -Lines @(
+        'כדי שהשינוי ייכנס לתוקף צריך להפעיל מחדש את סייר הקבצים.'
+        'שולחן העבודה ושורת המשימות ייעלמו לרגע, וחלונות תיקיות פתוחים ייסגרו.'
+        ''
+        'להפעיל מחדש עכשיו?'))) {
+        Write-Log 'השינוי יופיע אחרי הפעלה מחדש של סייר הקבצים או של המחשב.' $C_DIM
+        return
     }
+    Write-Log 'מפעיל מחדש את סייר הקבצים...'
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    # Windows brings the shell back by itself (AutoRestartShell), as the
+    # signed-in user. Up to 2.1 this process started it after two seconds
+    # when that had not happened yet - and a shell started from here runs
+    # with administrator rights, the whole desktop and everything launched
+    # from it. So: wait properly, and as a last resort start it with the
+    # administrator rights stripped (runas /trustlevel:0x20000).
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        [System.Windows.Forms.Application]::DoEvents()
+        if (Get-Process explorer -ErrorAction SilentlyContinue) { return }
+    }
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\runas.exe') -WindowStyle Hidden `
+                  -ArgumentList @('/trustlevel:0x20000', ('"{0}"' -f (Join-Path $env:SystemRoot 'explorer.exe')))
 }
 
 function Get-BuildNumber {
@@ -1414,8 +1503,8 @@ $groups = @{
         @{ Text = 'מעבר למצב ביצועים גבוהים';                 Act = { Action-HighPerf } }
         @{ Text = 'מעבר למצב ביצועים אולטימטיביים';           Act = { Action-UltraPerf } }
         @{ Text = 'חזרה למצב ביצועים מאוזן';                  Act = { Action-Balanced } }
-        @{ Text = 'השבתת מצב תרדמה  (מחיקת hiberfil.sys)';    Act = { Action-HibernateOff } }
-        @{ Text = 'הפעלת מצב תרדמה מחדש';                     Act = { Action-HibernateOn } }
+        @{ Text = $TOGGLE_TEXT.HibOffDo;                      Act = { Action-HibernateOff }; Key = 'HibOff' }
+        @{ Text = $TOGGLE_TEXT.HibOnDo;                       Act = { Action-HibernateOn };  Key = 'HibOn' }
         @{ Text = 'דוח בריאות סוללה';                         Act = { Action-BatteryReport } }
     ) }
     clean = @{ Title = 'ניקוי ושטח'; Items = @(
@@ -1426,8 +1515,8 @@ $groups = @{
     access = @{ Title = 'גישה מהירה וממשק'; Items = @(
         @{ Text = 'קיצור לרשימת כל התוכנות';                  Act = { Action-Shortcut } }
         @{ Text = 'קיצור ל-God Mode  (כל ההגדרות)';           Act = { Action-GodMode } }
-        @{ Text = 'תפריט ההקשר הישן  (Windows 11)';           Act = { Action-ClassicMenu } }
-        @{ Text = 'הצגת סיומות וקבצים מוסתרים';               Act = { Action-FileExtensions } }
+        @{ Text = $TOGGLE_TEXT.MenuToOld;                     Act = { Action-ClassicMenu };    Key = 'Menu' }
+        @{ Text = $TOGGLE_TEXT.ExtShow;                       Act = { Action-FileExtensions }; Key = 'Ext' }
     ) }
     net = @{ Title = 'רשת'; Items = @(
         @{ Text = 'איפוס ערימת הרשת';                         Act = { Action-NetworkReset };  Hot = $true }
@@ -1454,11 +1543,10 @@ $GAP      = 2 * $HALF                  # between columns; even, so it splits cle
 $PAD_TOP  = S 4
 $minCol   = S 300
 $maxText  = 0
-foreach ($g in $groups.Values) {
-    foreach ($it in $g.Items) {
-        $w = [System.Windows.Forms.TextRenderer]::MeasureText($it.Text, $F_UI).Width
-        if ($w -gt $maxText) { $maxText = $w }
-    }
+$captions = @($groups.Values | ForEach-Object { $_.Items } | ForEach-Object { $_.Text }) + @($TOGGLE_TEXT.Values)
+foreach ($c in $captions) {
+    $w = [System.Windows.Forms.TextRenderer]::MeasureText($c, $F_UI).Width
+    if ($w -gt $maxText) { $maxText = $w }
 }
 # caption + inner padding on both sides + the flat border
 $colWidth = [Math]::Max($minCol, $maxText + (S 24) + (S 8))
@@ -1551,12 +1639,14 @@ for ($ci = 0; $ci -lt $nCols; $ci++) {
             $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(48,56,48)
             $b.Cursor        = 'Hand'
 
-            $title  = $item.Text
+            # The log heading uses the caption as it reads at the moment of the
+            # click - a toggle's caption changes with the PC's state.
             $action = $item.Act
-            $b.Add_Click({ Invoke-Action $title $action }.GetNewClosure())
+            $b.Add_Click({ param($sender, $e) Invoke-Action $sender.Text $action }.GetNewClosure())
 
             $col.Controls.Add($b)
             $script:MenuButtons.Add($b)
+            if ($item.Key) { $script:KeyButtons[$item.Key] = $b }
         }
     }
 }
