@@ -77,7 +77,7 @@ function ConvertTo-VisualHebrew {
 }
 
 if ($args -contains '-Test') {
-    foreach ($t in @('תפריט','שדרוג מהדורה מ-Home ל-Pro','השבתת מצב תרדמה - פינוי מקום','בחר אפשרות (1-9): ','תפריט ההקשר (Windows 11)')) {
+    foreach ($t in @('תפריט','שדרוג מהדורה מ-Home ל-Pro','השבתת מצב תרדמה - פינוי מקום','בחר אפשרות (0-9): ','תפריט ההקשר (Windows 11)')) {
         '{0,-34} ->  {1}' -f $t, (ConvertTo-VisualHebrew $t)
     }
     return
@@ -238,11 +238,14 @@ Item '5' 'השבתת מצב תרדמה - פינוי מקום'
 Item '6' 'הפעלת מצב תרדמה מחדש'
 Item '7' 'קיצור לרשימת כל התוכנות'
 Item '8' 'שדרוג מהדורה מ-Home ל-Pro'
-Item '9' '--- יציאה ---'
+Item '9' 'יצירת נקודת שחזור'
+Item '0' '--- יציאה ---'
 Bot
 EB
-A ('choice /C 123456789 /N /M "' + (Vis 'בחר אפשרות (1-9): ') + '"')
-A 'if errorlevel 9 goto :EXITAPP'
+A ('choice /C 1234567890 /N /M "' + (Vis 'בחר אפשרות (0-9): ') + '"')
+A 'rem The 0 key is the tenth choice, so errorlevel 10.'
+A 'if errorlevel 10 goto :EXITAPP'
+A 'if errorlevel 9 goto :RESTORE_POINT'
 A 'if errorlevel 8 goto :UPGRADE_PRO'
 A 'if errorlevel 7 goto :CREATE_SHORTCUT'
 A 'if errorlevel 6 goto :HIBER_ON'
@@ -543,6 +546,55 @@ A 'goto :END_FAIL'
 A ':PRO_FAILED'
 EB
 E 'שינוי המהדורה נכשל. בדוק חיבור לאינטרנט ונסה שוב.'
+A 'goto :END_FAIL'
+A ''
+
+# --- 9 ----------------------------------------------------------------------
+A ':RESTORE_POINT'
+A 'cls'
+EB
+Rule
+E 'יוצר נקודת שחזור... זה עשוי לקחת דקה.'
+Rule
+A 'rem Windows silently skips a restore point when one was made in the last'
+A 'rem 24 hours. The limit is lifted for this one request and put back exactly'
+A 'rem as it was, and the newest point is compared before and after - so the'
+A 'rem ending says what really happened.'
+A 'set "SRKEY=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore"'
+A 'set "SRFREQ="'
+A 'for /f "tokens=3" %%v in (''reg query "%SRKEY%" /v SystemRestorePointCreationFrequency 2^>nul ^| findstr /I "SystemRestorePointCreationFrequency"'') do set "SRFREQ=%%v"'
+A 'reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d 0 /f >nul 2>&1'
+A 'set "vbsFile=%temp%\csharf_restore.vbs"'
+A '> "%vbsFile%" echo On Error Resume Next'
+A '>> "%vbsFile%" echo Set sr = GetObject^("winmgmts:\\.\root\default:SystemRestore"^)'
+A '>> "%vbsFile%" echo If Err.Number ^<^> 0 Then WScript.Quit 3'
+A '>> "%vbsFile%" echo Set svc = GetObject^("winmgmts:\\.\root\default"^)'
+A '>> "%vbsFile%" echo n0 = 0'
+A '>> "%vbsFile%" echo For Each p In svc.ExecQuery^("SELECT * FROM SystemRestore"^)'
+A '>> "%vbsFile%" echo   If p.SequenceNumber ^> n0 Then n0 = p.SequenceNumber'
+A '>> "%vbsFile%" echo Next'
+A '>> "%vbsFile%" echo sr.Enable "%SystemDrive%\"'
+A '>> "%vbsFile%" echo rc = sr.CreateRestorePoint^("Csharf", 12, 100^)'
+A '>> "%vbsFile%" echo If Err.Number ^<^> 0 Then WScript.Quit 1'
+A '>> "%vbsFile%" echo n1 = 0'
+A '>> "%vbsFile%" echo For Each p In svc.ExecQuery^("SELECT * FROM SystemRestore"^)'
+A '>> "%vbsFile%" echo   If p.SequenceNumber ^> n1 Then n1 = p.SequenceNumber'
+A '>> "%vbsFile%" echo Next'
+A '>> "%vbsFile%" echo If n1 ^> n0 Then WScript.Quit 0'
+A '>> "%vbsFile%" echo If rc ^<^> 0 Then WScript.Quit 1'
+A '>> "%vbsFile%" echo WScript.Quit 2'
+A 'cscript //nologo "%vbsFile%" >nul 2>&1'
+A 'set "RP_RC=%errorlevel%"'
+A 'del "%vbsFile%" >nul 2>&1'
+A 'if defined SRFREQ (reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d %SRFREQ% /f >nul 2>&1) else reg delete "%SRKEY%" /v SystemRestorePointCreationFrequency /f >nul 2>&1'
+A 'if "%RP_RC%"=="0" goto :END_OK'
+A 'if "%RP_RC%"=="2" goto :RP_SKIPPED'
+EB
+E 'שחזור המערכת כבוי, חסום או לא זמין במחשב הזה.'
+A 'goto :END_FAIL'
+A ':RP_SKIPPED'
+EB
+E 'Windows לא יצר נקודה חדשה. ייתכן ששחזור המערכת מוגבל במחשב הזה.'
 A 'goto :END_FAIL'
 A ''
 

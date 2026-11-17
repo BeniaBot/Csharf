@@ -79,11 +79,14 @@ echo บ  [5]      …— …” -  –    บ
 echo บ  [6]                – ’”   บ
 echo บ  [7]           ……   …–—   บ
 echo บ  [8]         Pro- Home- … …   บ
-echo บ  [9]                     --- €– ---   บ
+echo บ  [9]                 … …— –   บ
+echo บ  [0]                     --- €– ---   บ
 echo ศออออออออออออออออออออออออออออออออออออออออออผ
 echo.
-choice /C 123456789 /N /M " :(1-9) …”€ "
-if errorlevel 9 goto :EXITAPP
+choice /C 1234567890 /N /M " :(0-9) …”€ "
+rem The 0 key is the tenth choice, so errorlevel 10.
+if errorlevel 10 goto :EXITAPP
+if errorlevel 9 goto :RESTORE_POINT
 if errorlevel 8 goto :UPGRADE_PRO
 if errorlevel 7 goto :CREATE_SHORTCUT
 if errorlevel 6 goto :HIBER_ON
@@ -367,6 +370,53 @@ goto :END_FAIL
 :PRO_FAILED
 echo.
 echo  .… ‘… € … —… . … …
+goto :END_FAIL
+
+:RESTORE_POINT
+cls
+echo.
+echo อออออออออออออออออออออออออออออออออออออออออออ
+echo  .— — …’  ...… …— –…
+echo อออออออออออออออออออออออออออออออออออออออออออ
+rem Windows silently skips a restore point when one was made in the last
+rem 24 hours. The limit is lifted for this one request and put back exactly
+rem as it was, and the newest point is compared before and after - so the
+rem ending says what really happened.
+set "SRKEY=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore"
+set "SRFREQ="
+for /f "tokens=3" %%v in ('reg query "%SRKEY%" /v SystemRestorePointCreationFrequency 2^>nul ^| findstr /I "SystemRestorePointCreationFrequency"') do set "SRFREQ=%%v"
+reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d 0 /f >nul 2>&1
+set "vbsFile=%temp%\csharf_restore.vbs"
+> "%vbsFile%" echo On Error Resume Next
+>> "%vbsFile%" echo Set sr = GetObject^("winmgmts:\\.\root\default:SystemRestore"^)
+>> "%vbsFile%" echo If Err.Number ^<^> 0 Then WScript.Quit 3
+>> "%vbsFile%" echo Set svc = GetObject^("winmgmts:\\.\root\default"^)
+>> "%vbsFile%" echo n0 = 0
+>> "%vbsFile%" echo For Each p In svc.ExecQuery^("SELECT * FROM SystemRestore"^)
+>> "%vbsFile%" echo   If p.SequenceNumber ^> n0 Then n0 = p.SequenceNumber
+>> "%vbsFile%" echo Next
+>> "%vbsFile%" echo sr.Enable "%SystemDrive%\"
+>> "%vbsFile%" echo rc = sr.CreateRestorePoint^("Csharf", 12, 100^)
+>> "%vbsFile%" echo If Err.Number ^<^> 0 Then WScript.Quit 1
+>> "%vbsFile%" echo n1 = 0
+>> "%vbsFile%" echo For Each p In svc.ExecQuery^("SELECT * FROM SystemRestore"^)
+>> "%vbsFile%" echo   If p.SequenceNumber ^> n1 Then n1 = p.SequenceNumber
+>> "%vbsFile%" echo Next
+>> "%vbsFile%" echo If n1 ^> n0 Then WScript.Quit 0
+>> "%vbsFile%" echo If rc ^<^> 0 Then WScript.Quit 1
+>> "%vbsFile%" echo WScript.Quit 2
+cscript //nologo "%vbsFile%" >nul 2>&1
+set "RP_RC=%errorlevel%"
+del "%vbsFile%" >nul 2>&1
+if defined SRFREQ (reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d %SRFREQ% /f >nul 2>&1) else reg delete "%SRKEY%" /v SystemRestorePointCreationFrequency /f >nul 2>&1
+if "%RP_RC%"=="0" goto :END_OK
+if "%RP_RC%"=="2" goto :RP_SKIPPED
+echo.
+echo  .   € …€ …‘ ,… ’ …
+goto :END_FAIL
+:RP_SKIPPED
+echo.
+echo  .  … ’ …  . …— – € Windows
 goto :END_FAIL
 
 :END_OK

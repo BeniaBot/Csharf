@@ -114,6 +114,15 @@ try {
     if ($ed -match '^Professional') { Check ($rc -eq 13) "UPGRADE_PRO on $ed -> code $rc (no change)" }
     else { "        UPGRADE_PRO not run: this PC is $ed" }
 
+    # --- restore point without admin: must fail cleanly and leave the 24-hour
+    #     limit exactly as it was ---
+    $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+    $freq0 = (Get-ItemProperty -LiteralPath $srKey -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+    $rc = Run ':RESTORE_POINT'
+    $freq1 = (Get-ItemProperty -LiteralPath $srKey -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+    Check ($rc -eq 11 -and "$freq0" -eq "$freq1") "RESTORE_POINT without admin -> code $rc (failed), 24-hour limit unchanged ([$freq0] -> [$freq1])"
+    Check (-not (Test-Path -LiteralPath (Join-Path $env:TEMP 'csharf_restore.vbs'))) 'its helper script was removed'
+
     # --- the temp-folder guard, on a substituted drive so a mistake costs nothing ---
     $root = Join-Path $OutDir 'fakedrive'
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'Temp\sub') | Out-Null

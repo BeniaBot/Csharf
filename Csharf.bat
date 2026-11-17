@@ -372,6 +372,7 @@ function Format-Size {
     # word and shown as "GB 54.08".
     param([double]$Bytes)
     $lrm = [string][char]0x200E
+    if ($Bytes -ge 1TB) { return $lrm + ('{0:N2} TB' -f ($Bytes / 1TB)) }
     if ($Bytes -ge 1GB) { return $lrm + ('{0:N2} GB' -f ($Bytes / 1GB)) }
     if ($Bytes -ge 1MB) { return $lrm + ('{0:N1} MB' -f ($Bytes / 1MB)) }
     if ($Bytes -ge 1KB) { return $lrm + ('{0:N0} KB' -f ($Bytes / 1KB)) }
@@ -1457,6 +1458,94 @@ function Action-ProductKey {
     } catch { }
 }
 
+function Action-PcInfo {
+    # The things a repair shop, a warranty claim or a "what do I have?" call
+    # asks for, gathered in one place and copied to the clipboard. Read-only.
+    # The queries can take a second or two, so they run on a second thread.
+    Write-Log 'אוסף את פרטי המחשב...'
+    $info = Invoke-Background -Script {
+        $cs   = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+        $cpu  = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+        $os   = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Where-Object { $_ })
+        # Storage namespace knows SSD from HDD; Win32_DiskDrive is the fallback.
+        $disks = @()
+        try {
+            $disks = @(Get-CimInstance -Namespace root\Microsoft\Windows\Storage -ClassName MSFT_PhysicalDisk -ErrorAction Stop |
+                       ForEach-Object { [PSCustomObject]@{ Name = $_.FriendlyName; Size = [double]$_.Size
+                                        Kind = switch ([int]$_.MediaType) { 3 { 'HDD' } 4 { 'SSD' } default { '' } } } })
+        } catch {
+            $disks = @(Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+                       ForEach-Object { [PSCustomObject]@{ Name = $_.Model; Size = [double]$_.Size; Kind = '' } })
+        }
+        [PSCustomObject]@{
+            Maker  = [string]$cs.Manufacturer; Model = [string]$cs.Model
+            Serial = [string]$bios.SerialNumber; Bios = [string]$bios.SMBIOSBIOSVersion
+            Cpu    = ([string]$cpu.Name).Trim(); Cores = $cpu.NumberOfCores; Threads = $cpu.NumberOfLogicalProcessors
+            Ram    = [double]$cs.TotalPhysicalMemory
+            Gpus   = $gpus; Disks = $disks
+            Installed = $os.InstallDate; Booted = $os.LastBootUpTime
+        }
+    }
+    $i = @($info) | Select-Object -Last 1
+    if (-not $i) { Write-Err 'לא הצלחתי לקרוא את פרטי המחשב.'; return }
+
+    # Placeholder serials that manufacturers leave in self-built PCs.
+    $serial = $i.Serial.Trim()
+    if ($serial -match '^(|0+|To be filled.*|Default string|System Serial Number|None|N/A)$') { $serial = 'לא רשום בקושחה' }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("יצרן ודגם:  $($i.Maker.Trim()) $($i.Model.Trim())")
+    $lines.Add("מספר סידורי:  $serial")
+    $lines.Add("מעבד:  $($i.Cpu)  ·  $($i.Cores) ליבות, $($i.Threads) תהליכונים")
+    $lines.Add("זיכרון:  $(Format-Size $i.Ram)")
+    foreach ($g in $i.Gpus) { $lines.Add("כרטיס מסך:  $g") }
+    foreach ($d in $i.Disks) {
+        $kind = if ($d.Kind) { "  ·  $($d.Kind)" } else { '' }
+        $lines.Add("דיסק:  $($d.Name)  ·  $(Format-Size $d.Size)$kind")
+    }
+    if ($i.Bios)      { $lines.Add("גרסת קושחה:  $($i.Bios.Trim())") }
+    if ($i.Installed) { $lines.Add("מערכת ההפעלה הותקנה:  $($i.Installed.ToString('dd/MM/yyyy'))") }
+    if ($i.Booted) {
+        $up = (Get-Date) - $i.Booted
+        $lines.Add("פועל ברציפות:  $([int][Math]::Floor($up.TotalDays)) ימים, $($up.Hours) שעות")
+    }
+    foreach ($l in $lines) { Write-Ok $l }
+    try {
+        [System.Windows.Forms.Clipboard]::SetText(($lines -join [Environment]::NewLine))
+        Write-Log 'הפרטים הועתקו ללוח - אפשר להדביק אותם בהודעה או במייל.' $C_DIM
+    } catch { }
+}
+
+function Get-FirmwareType {
+    # cmd's built-in %firmware_type%: "UEFI" or "Legacy" (Windows 8 and up).
+    try { return ([string](& cmd.exe /d /c 'echo %firmware_type%' 2>$null | Select-Object -First 1)).Trim() } catch { return '' }
+}
+
+function Action-FirmwareSetup {
+    # Settings > Recovery > Advanced startup > Troubleshoot > Advanced options
+    # > UEFI firmware settings - five screens and a reboot - in one button.
+    if ((Get-FirmwareType) -ne 'UEFI') {
+        Write-Warn 'המחשב הזה לא עלה במצב UEFI, ולכן Windows לא יכול להפעיל אותו ישר להגדרות הקושחה. במחשב כזה נכנסים אליהן במקש בזמן ההדלקה (לרוב Del, F2 או F10).'
+        return
+    }
+    if (-not (Confirm-Action -Title 'הגדרות הקושחה' -Lines @(
+        'המחשב יופעל מחדש ישר למסך ההגדרות של הקושחה (UEFI / BIOS).'
+        'שמור וסגור את כל המסמכים הפתוחים לפני שתמשיך.'
+        ''
+        'להמשיך?'))) {
+        Write-Warn 'הפעולה בוטלה.'
+        return
+    }
+    if (-not (Show-RebootCountdown)) {
+        Write-Warn 'ההפעלה מחדש בוטלה.'
+        return
+    }
+    $code = Start-Tool 'shutdown.exe' @('/r', '/fw', '/t', '0') -NoStop
+    if ($code -eq 0) { Write-Log 'מפעיל מחדש להגדרות הקושחה...' }
+    else { Write-Err "Windows סירב להפעיל מחדש להגדרות הקושחה (קוד $code)." }
+}
+
 function Action-NetworkReset {
     if (-not (Confirm-Action -Title 'איפוס הגדרות הרשת' -Lines @(
         'הפעולה תאפס את מחסנית הרשת: מטמון DNS, Winsock ו-TCP/IP.'
@@ -1572,7 +1661,9 @@ $groups = @{
     ) }
     sys = @{ Title = 'מערכת ורישוי'; Items = @(
         @{ Text = 'יצירת נקודת שחזור';                        Act = { Action-RestorePoint } }
+        @{ Text = 'פרטי המחשב והחומרה';                       Act = { Action-PcInfo } }
         @{ Text = 'הצגת מפתח המוצר מהקושחה';                  Act = { Action-ProductKey } }
+        @{ Text = 'הפעלה מחדש להגדרות הקושחה  (BIOS)';        Act = { Action-FirmwareSetup };  Hot = $true }
         @{ Text = 'שדרוג מהדורה מ-Home ל-Pro';                Act = { Action-UpgradePro };  Hot = $true }
     ) }
 }
@@ -1582,7 +1673,7 @@ $groups = @{
 # The first column is the right-hand one: that is where an RTL reader starts.
 # Two columns when the screen is tall enough; three - a wider, shorter window -
 # when it is not, which is the usual 1080p laptop running at 150%.
-$layouts = @('perf,clean|access,net,sys', 'perf|clean,net|access,sys')
+$layouts = @('perf,sys|clean,access,net', 'perf|clean,access|sys,net')
 
 $H_HEAD   = S 26; $M_HEAD = S 10       # heading height, space above it
 $H_BTN    = S 36; $M_BTN  = S 4        # button height, space under it
