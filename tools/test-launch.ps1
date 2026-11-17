@@ -88,5 +88,47 @@ Wait-Quiet
 $left = @(Get-ChildItem -LiteralPath $OutDir -Filter 'launch-*.ps1').Count
 Check ($left -eq (Prompts)) "extracted files left = prompts ($left)"
 Get-ChildItem -LiteralPath $OutDir -Filter 'launch-*.ps1' | Remove-Item -Force
+
+# D: the WHOLE file - batch half included - opened twice within one second,
+#    the way a double-click registered twice does it. Here the stand-in for
+#    the prompt also checks, at the moment of "approval", that the script
+#    the elevated copy will run still exists. 2.1 extracted both starts to
+#    the same %RANDOM%-named file and the second start deleted it: the
+#    prompt was approved and no window ever opened.
+$fullCounter = Join-Path $OutDir 'full.txt'
+Set-Content -LiteralPath $fullCounter -Value $null
+$fakeFull = @'
+$elevated = Start-Process -FilePath powershell.exe -PassThru -NoNewWindow -ArgumentList ('-NoProfile -Command "Add-Content -LiteralPath ''COUNTER'' -Value prompt; Start-Sleep -Seconds 4; if (Test-Path -LiteralPath ''' + $PSCommandPath + ''') { Add-Content -LiteralPath ''COUNTER'' -Value present } else { Add-Content -LiteralPath ''COUNTER'' -Value MISSING }; $m = New-Object System.Threading.Mutex($true, ''Local\Csharf-SingleInstance''); Start-Sleep -Seconds 8; $m.ReleaseMutex()"')
+'@
+$fakeFull = $fakeFull.Replace('COUNTER', $fullCounter)
+$whole = [IO.File]::ReadAllText($Bat, (New-Object Text.UTF8Encoding($false)))
+$at    = $whole.LastIndexOf($marker) + $marker.Length
+$head  = $whole.Substring(0, $at)
+$tail  = [regex]::Replace($whole.Substring($at), $rx, [System.Text.RegularExpressions.MatchEvaluator]{ param($x) $fakeFull })
+$fullBat = Join-Path $OutDir 'Csharf-full-test.bat'
+[IO.File]::WriteAllText($fullBat, $head + $tail, (New-Object Text.UTF8Encoding($false)))
+# The race depends on timing, so it runs three times; one lost script is a failure.
+$prompts = 0; $present = 0; $missing = 0
+for ($round = 1; $round -le 3; $round++) {
+    Set-Content -LiteralPath $fullCounter -Value $null
+    # Both starts inside one clock second - cmd seeds %RANDOM% from whole
+    # seconds, which is what made 2.1's two starts share a file. Start right
+    # after a second ticks over, back to back.
+    $t0 = Get-Date; while ((Get-Date).Second -eq $t0.Second) { Start-Sleep -Milliseconds 5 }
+    $s1 = Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /c ""' + $fullBat + '""') -PassThru -NoNewWindow
+    $s2 = Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /c ""' + $fullBat + '""') -PassThru -NoNewWindow
+    $s1.WaitForExit(); $s2.WaitForExit()
+    Start-Sleep -Seconds 7
+    Wait-Quiet
+    $said = @(Get-Content -LiteralPath $fullCounter | Where-Object { $_ })
+    "  round {0}: {1}" -f $round, ($said -join ', ')
+    $prompts += @($said | Where-Object { $_ -eq 'prompt' }).Count
+    $present += @($said | Where-Object { $_ -eq 'present' }).Count
+    $missing += @($said | Where-Object { $_ -eq 'MISSING' }).Count
+}
+Check ($prompts -eq 3) "the whole file opened twice in one second, three times -> $prompts prompt(s)"
+Check ($present -eq 3 -and $missing -eq 0) "at every approval the script is still there (present $present, missing $missing)"
+Get-ChildItem -LiteralPath $env:TEMP -Filter 'Csharf_*.ps1' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-3) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $fullBat -Force -ErrorAction SilentlyContinue
 "RESULT: $fail failed"
 exit $fail

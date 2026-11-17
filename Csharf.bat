@@ -20,25 +20,28 @@ rem ============================================================================
 
 setlocal
 
-rem ----------------------------------------------- extract embedded script --
-rem It is written out as UTF-8 *with* BOM so powershell.exe reads the Hebrew
-rem correctly. LastIndexOf so a stray mention of the marker cannot fool it.
+rem ------------------------------------------ extract and start the script --
+rem One PowerShell call reads the payload below the marker, writes it out as
+rem UTF-8 *with* BOM (so powershell.exe reads the Hebrew correctly) under a
+rem name of its own, starts it detached and hidden, and returns - this console
+rem must not linger behind the GUI. LastIndexOf, so a stray mention of the
+rem marker cannot fool it.
+rem
+rem The name comes from a GUID, not from %RANDOM%: cmd seeds %RANDOM% from the
+rem clock in whole seconds, so two starts within the same second wrote the
+rem SAME file - and the second start, stepping aside for the first one's UAC
+rem prompt, deleted it before the elevated copy could read it (2.1 opened no
+rem window at all after the prompt was approved; seen on a clean Windows 11).
 set "CSHARF_SELF=%~f0"
-set "CSHARF_PS1=%TEMP%\Csharf_%RANDOM%%RANDOM%.ps1"
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$m='#PS'+'BODY'+'-ST'+'ART'; $s=[IO.File]::ReadAllText($env:CSHARF_SELF,[Text.Encoding]::UTF8); $i=$s.LastIndexOf($m); if($i -lt 0){ exit 1 }; [IO.File]::WriteAllText($env:CSHARF_PS1, $s.Substring($i+$m.Length), (New-Object Text.UTF8Encoding($true)))"
-if errorlevel 1 goto :extract_failed
-if not exist "%CSHARF_PS1%" goto :extract_failed
-
-rem Launch detached and hidden, then leave immediately - this console must not
-rem linger behind the GUI. The script removes itself when the window closes.
-start "" powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%CSHARF_PS1%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$m='#PS'+'BODY'+'-ST'+'ART'; $s=[IO.File]::ReadAllText($env:CSHARF_SELF,[Text.Encoding]::UTF8); $i=$s.LastIndexOf($m); if($i -lt 0){ exit 1 }; $p=Join-Path $env:TEMP ('Csharf_'+[guid]::NewGuid().ToString('N')+'.ps1'); [IO.File]::WriteAllText($p, $s.Substring($i+$m.Length), (New-Object Text.UTF8Encoding($true))); $q=[char]34; Start-Process -FilePath (Get-Process -Id $PID).Path -WindowStyle Hidden -ErrorAction Stop -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File '+$q+$p+$q)"
+if errorlevel 1 goto :start_failed
 exit /b
 
-:extract_failed
+:start_failed
 echo.
-echo   [!] Failed to extract the embedded script.
-echo       Make sure the file was saved as UTF-8 without BOM.
+echo   [!] Csharf could not unpack or start its PowerShell part.
+echo       Make sure the file was saved as UTF-8 without BOM, and that
+echo       PowerShell is not blocked on this PC.
 echo.
 pause
 exit /b 1
