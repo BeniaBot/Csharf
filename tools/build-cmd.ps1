@@ -142,7 +142,7 @@ function Item { param([string]$n, [string]$text)
 }
 function Rule { A ('echo ' + ([string][char]0x2550) * 43) }
 
-$VERSION = '1.1'
+$VERSION = '2.1'
 $GH = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $GB = '381b4222-f694-41f0-9685-ff5bb260df2e'
 $GU = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
@@ -341,7 +341,7 @@ A ''
 A 'rem Removes a plan only when it is clearly a leftover of this tool: its own'
 A 'rem fixed ids, anything named or described "Csharf", and nameless copies of'
 A 'rem the stock High Performance / Ultimate plans - what -duplicatescheme'
-A 'rem without a destination leaves, on every click in versions before 1.1.'
+A 'rem without a destination leaves, on every click in 1.0.'
 A 'rem Never a built-in plan, never the active one, never one somebody named.'
 A ':MAYBE_DEL'
 A 'set "G=%~1"'
