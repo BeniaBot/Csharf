@@ -48,7 +48,7 @@ exit /b 1
 #  Csharf - GUI edition
 # ============================================================================
 
-$CSHARF_VERSION = '2.1'
+$CSHARF_VERSION = '2.2'
 
 $ErrorActionPreference = 'Continue'
 
@@ -242,6 +242,7 @@ $F_UI     = New-UiFont 'Segoe UI' 13.5
 $F_BOLD   = New-UiFont 'Segoe UI' 13.5 ([System.Drawing.FontStyle]::Bold)
 $F_TITLE  = New-UiFont 'Segoe UI' 20   ([System.Drawing.FontStyle]::Bold)
 $F_MONO   = New-UiFont 'Consolas' 12.5
+$F_SYMBOL = New-UiFont 'Segoe UI Symbol' 12.5
 
 # ============================================================================
 #  Helpers
@@ -677,19 +678,34 @@ $root.Controls.Add($pnlExit, 0, 4)
 #  Logging / busy state
 # ============================================================================
 
-function Write-Log {
-    param([string]$Text, [System.Drawing.Color]$Color = $C_DIM)
+function Add-LogRun {
+    # One stretch of text in one font and colour, at the end of the log.
+    param([string]$Text, [System.Drawing.Font]$Font, [System.Drawing.Color]$Color)
     $log.SelectionStart  = $log.TextLength
     $log.SelectionLength = 0
+    $log.SelectionFont   = $Font
     $log.SelectionColor  = $Color
-    $log.AppendText(('[{0}]  {1}{2}' -f (Get-Date -Format 'HH:mm:ss'), $Text, [Environment]::NewLine))
+    $log.AppendText($Text)
+}
+
+function Write-Log {
+    # The status mark goes in the symbol font. Consolas has no check mark,
+    # warning sign or cross, and the log box does not borrow them from
+    # another font: up to 2.1 every one of them showed as an empty square.
+    param([string]$Text, [System.Drawing.Color]$Color = $C_DIM, [string]$Icon = '')
+    Add-LogRun ('[{0}]  ' -f (Get-Date -Format 'HH:mm:ss')) $F_MONO $Color
+    if ($Icon) {
+        Add-LogRun $Icon $F_SYMBOL $Color
+        Add-LogRun '  ' $F_MONO $Color
+    }
+    Add-LogRun ($Text + [Environment]::NewLine) $F_MONO $Color
     $log.SelectionColor  = $log.ForeColor
     $log.ScrollToCaret()
     [System.Windows.Forms.Application]::DoEvents()
 }
-function Write-Ok   { param([string]$t) Write-Log "✔  $t" $C_FG }
-function Write-Warn { param([string]$t) Write-Log "⚠  $t" $C_WARN }
-function Write-Err  { param([string]$t) Write-Log "✖  $t" $C_ERR }
+function Write-Ok   { param([string]$t) Write-Log $t $C_FG   ([string][char]0x2714) }
+function Write-Warn { param([string]$t) Write-Log $t $C_WARN ([string][char]0x26A0) }
+function Write-Err  { param([string]$t) Write-Log $t $C_ERR  ([string][char]0x2716) }
 
 function Update-Status {
     $ed   = Get-CsharfEdition
