@@ -19,9 +19,10 @@ rem back by cscript in the ANSI code page: the elevated cmd gets a corrupted
 rem path and the window closes the moment it opens. 1.0 relied on the 8.3
 rem short name to dodge this, but drives other than C: usually have short
 rem names switched off, and then there is none. An argument stays Unicode.
-rem
-rem The command line built for the elevated cmd is  /c ""<path>" /elevated"
-rem - outer quotes that cmd strips, so a path with spaces, ( ) or & survives.
+rem Second stage: the window exists, so the temporary font key (see below)
+rem has done its job. Removed first thing - whether this copy got admin rights
+rem or not - and only when it carries our mark.
+if /i "%~1"=="/elevated" reg query "HKCU\Console\%%SystemRoot%%_System32_conhost.exe" /v CsharfTemporary >nul 2>&1 && reg delete "HKCU\Console\%%SystemRoot%%_System32_conhost.exe" /f >nul 2>&1
 IF "%PROCESSOR_ARCHITECTURE%" EQU "amd64" (
 >nul 2>&1 "%SYSTEMROOT%\SysWOW64\icacls.exe" "%SYSTEMROOT%\SysWOW64\config\system"
 ) ELSE (
@@ -32,15 +33,50 @@ if /i "%~1"=="/elevated" goto :noAdmin
 echo.
 echo   Requesting administrative privileges . . .
 set "CSHARF_SELF=%~f0"
+rem The elevated copy runs in a classic console window. Its usual font,
+rem Consolas, has no Hebrew letters; Windows borrows narrower ones from another
+rem font and every word shows gaps. So the window is opened through
+rem conhost.exe directly: such a console reads its settings from a registry
+rem key of its own, which nothing else normally uses. That key is given a font
+rem with real Hebrew letters (Courier New) for the moment the window is
+rem created, marked CsharfTemporary, and the elevated copy removes it again
+rem (see :gotAdmin). A key somebody made themselves is never touched.
+set "CSHARF_CONKEY=HKCU\Console\%%SystemRoot%%_System32_conhost.exe"
+set "CSHARF_OWN=0"
+reg query "%CSHARF_CONKEY%" >nul 2>&1 || set "CSHARF_OWN=1"
+reg query "%CSHARF_CONKEY%" /v CsharfTemporary >nul 2>&1 && set "CSHARF_OWN=1"
+if "%CSHARF_OWN%"=="1" (
+  reg add "%CSHARF_CONKEY%" /v FaceName /t REG_SZ /d "Courier New" /f >nul 2>&1
+  reg add "%CSHARF_CONKEY%" /v FontFamily /t REG_DWORD /d 0x36 /f >nul 2>&1
+  reg add "%CSHARF_CONKEY%" /v FontWeight /t REG_DWORD /d 700 /f >nul 2>&1
+  reg add "%CSHARF_CONKEY%" /v FontSize /t REG_DWORD /d 0x00120000 /f >nul 2>&1
+  reg add "%CSHARF_CONKEY%" /v CsharfTemporary /t REG_DWORD /d 1 /f >nul 2>&1
+)
+rem The second stage starts as   cmd.exe /c call "<path>" /elevated
+rem After /c the line does not begin with a quote, so cmd strips none and the
+rem path survives spaces, ( ) and & alike. (The older  /c ""<path>" ..."  form
+rem cannot be used here: conhost splits its command line into arguments and
+rem joins them again, quoting each one that holds a space and turning inner
+rem quotes into \" - which cmd does not understand.) One case conhost cannot
+rem carry: a path with an & but no space is passed on unquoted. That rare
+rem path goes the plain cmd.exe way, without the font, which passes the line
+rem untouched.
+rem conhost.exe is 64-bit only; a 32-bit cmd sees SysWOW64 as System32.
+set "CSHARF_HOST=%SystemRoot%\System32\conhost.exe"
+if exist "%SystemRoot%\Sysnative\conhost.exe" set "CSHARF_HOST=%SystemRoot%\Sysnative\conhost.exe"
+if not exist "%CSHARF_HOST%" set "CSHARF_HOST=cmd.exe"
+if "!CSHARF_SELF: =!"=="!CSHARF_SELF!" if not "!CSHARF_SELF:&=!"=="!CSHARF_SELF!" set "CSHARF_HOST=cmd.exe"
+set "CSHARF_PRE=cmd.exe /c call"
+if /i "%CSHARF_HOST%"=="cmd.exe" set "CSHARF_PRE=/c call"
 echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\getadmin.vbs"
-echo UAC.ShellExecute "cmd.exe", "/c """"" ^& WScript.Arguments^(0^) ^& """ /elevated""", "", "runas", 1 >> "%temp%\getadmin.vbs"
-cscript //nologo "%temp%\getadmin.vbs" "%~f0" >nul 2>&1
+echo UAC.ShellExecute WScript.Arguments^(1^), WScript.Arguments^(2^) ^& " """ ^& WScript.Arguments^(0^) ^& """ /elevated", "", "runas", 1 >> "%temp%\getadmin.vbs"
+cscript //nologo "%temp%\getadmin.vbs" "%~f0" "%CSHARF_HOST%" "%CSHARF_PRE%" >nul 2>&1
 set "CSHARF_VBS=%errorlevel%"
 del "%temp%\getadmin.vbs" >nul 2>&1
 if "%CSHARF_VBS%"=="0" exit /B
 rem No VBScript on this Windows (Microsoft is phasing it out). Same request
 rem through PowerShell; [char]34 is a quote, which spares a layer of escaping.
-powershell -NoProfile -Command "try { $q=[char]34; Start-Process -FilePath $env:ComSpec -Verb RunAs -ErrorAction Stop -ArgumentList ('/c ' + $q + $q + $env:CSHARF_SELF + $q + ' /elevated' + $q) } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -Command "try { $q=[char]34; Start-Process -FilePath $env:CSHARF_HOST -Verb RunAs -ErrorAction Stop -ArgumentList ($env:CSHARF_PRE + ' ' + $q + $env:CSHARF_SELF + $q + ' /elevated') } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 goto :noAdmin
 exit /B
 
