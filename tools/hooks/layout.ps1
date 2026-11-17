@@ -23,6 +23,13 @@ $cc = [System.Windows.Forms.Control].GetMethod('CreateControl',
         [System.Reflection.BindingFlags]'NonPublic,Instance', $null, [Type[]]@([bool]), $null)
 [void]$cc.Invoke($form, @($true))
 $form.PerformLayout()
+# The frame the layout planned with must be the frame the window really has.
+# A probe that is taller than the screen gets clamped and yields nonsense
+# (2.1 measured -180px on a 1280x800 screen and squeezed the log away).
+if ($null -ne $frameH) {
+    $realFrame = $form.Height - $form.ClientSize.Height
+    Check ([Math]::Abs($frameH - $realFrame) -le 2) "frame height planned $frameH px = drawn $realFrame px"
+}
 # what the window does once it is shown (2.2 and up)
 if (Get-Command Fit-ToScreen -ErrorAction SilentlyContinue) { Fit-ToScreen; $form.PerformLayout() }
 try { Update-Status } catch { }

@@ -1696,7 +1696,9 @@ $layouts = @('perf,sys|clean,access,net', 'perf|clean,access|sys,net')
 
 $H_HEAD   = S 26; $M_HEAD = S 10       # heading height, space above it
 $H_BTN    = S 36; $M_BTN  = S 4        # button height, space under it
-$HALF     = S 6
+# 8px between columns: with 12, three columns came out 4px too wide for a
+# 1024px screen and it fell back to two columns and a scrolling menu.
+$HALF     = S 4
 $GAP      = 2 * $HALF                  # between columns; even, so it splits cleanly
 $PAD_TOP  = S 4
 $minCol   = S 300
@@ -1717,9 +1719,13 @@ function Get-ColumnHeight {
 }
 
 # Size of the window frame around the client area, for this display scale.
-$form.ClientSize = New-Object System.Drawing.Size(1000, 1000)
-$frameW = $form.Width  - 1000
-$frameH = $form.Height - 1000
+# Measured on a SMALL client area. Windows caps a window at the height of the
+# screen, so a 1000x1000 probe (what 2.1 used) came back clamped on any screen
+# shorter than ~1040px: on a 1280x800 laptop the "frame" measured -180px, the
+# layout believed two columns fitted, and the log was squeezed to 7px.
+$form.ClientSize = New-Object System.Drawing.Size(300, 300)
+$frameW = $form.Width  - 300
+$frameH = $form.Height - 300
 
 $wa      = $script:WorkArea
 $fixedH  = $H_TITLE + $H_STATUS + $H_BOTTOM
@@ -1851,12 +1857,10 @@ $form.Add_FormClosing({
 # ============================================================================
 
 function Fit-ToScreen {
-    # Safety net once the window really exists. The size above is worked out
-    # from the frame Windows reports before the window is made, and some
-    # sessions (no visual styles, a remote or service desktop) draw a taller
-    # frame than they report. Whatever the cause, the window never ends up
-    # taller or wider than the screen: it is cut to fit - the log row gives
-    # way first, then the menu scrolls - and moved back inside.
+    # Safety net once the window really exists: whatever the sums above got
+    # wrong on some unusual screen, the window never ends up taller or wider
+    # than the working area - it is cut to fit (the log row gives way first,
+    # then the menu scrolls) and moved back inside.
     $wa = $script:WorkArea
     if ($form.Height -gt $wa.Height) { $form.Height = $wa.Height }
     if ($form.Width  -gt $wa.Width)  { $form.Width  = $wa.Width }
