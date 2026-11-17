@@ -45,7 +45,8 @@ Check (@(Get-Process ping -ErrorAction SilentlyContinue).Count -eq 0) 'ping.exe 
 Check ($log.Text -notmatch 'SHOULD-NOT-APPEAR') 'action did not carry on after the stop'
 Check ($log.Text.Contains($HE_STOPPED))    'log says the action was stopped'
 Check (-not $script:Busy)                  'idle again'
-Check (-not ($script:MenuButtons | Where-Object { -not $_.Enabled })) 'menu buttons enabled again'
+# (a toggle with nothing to do - Tag 'na' - stays greyed on purpose)
+Check (-not ($script:MenuButtons | Where-Object { -not $_.Enabled -and $_.Tag -ne 'na' })) 'menu buttons enabled again'
 Check ($bExit.Text -eq $HE_EXIT)           "bottom button back to exit [$($bExit.Text)]"
 
 # ---- 2. -NoStop: the button must not be able to cut it off --------------------
