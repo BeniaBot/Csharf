@@ -821,7 +821,7 @@ function Action-HighPerf {
         $r = Use-OwnScheme $GUID_CS_HIGH $GUID_BALANCED 'High Performance (Csharf)' 'ביצועים גבוהים - Csharf' `
                            -Tune @(,@('AC','SUB_PROCESSOR','PROCTHROTTLEMIN',100))
     }
-    if ($r) { Write-Ok 'מצב ביצועים גבוהים הופעל (סכימה מותאמת, כי המחשב חוסם את הרגילה).' }
+    if ($r) { Write-Ok 'מצב ביצועים גבוהים הופעל (תוכנית מותאמת, כי המחשב חוסם את הרגילה).' }
     else    { Write-Err 'לא הצלחתי להפעיל מצב ביצועים גבוהים במחשב הזה.' }
 }
 
@@ -830,7 +830,7 @@ function Action-UltraPerf {
     # template, and copying it is the documented way to turn it on. Versions
     # before 2.1 made the copy and then tried to activate the template itself,
     # which never works - so the official plan was never actually used.
-    Write-Log 'מנסה להפעיל את הסכימה הרשמית של Windows...'
+    Write-Log 'מנסה להפעיל את תוכנית החשמל הרשמית של Windows...'
     $r = Use-OwnScheme $GUID_CS_ULT $GUID_ULTIMATE 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf'
     if ($r) {
         Set-ProcessorIdleAllowed $GUID_CS_ULT
@@ -843,7 +843,7 @@ function Action-UltraPerf {
     # Full speed applies on mains power only; on battery the plan keeps the
     # base plan's own values, so a laptop does not cook itself in a bag.
     # The display timeout is left alone everywhere.
-    Write-Warn 'המחשב חוסם את הסכימה הרשמית - בונה סכימה מקבילה.'
+    Write-Warn 'המחשב חוסם את התוכנית הרשמית - בונה תוכנית מקבילה.'
     $base = if (Test-Scheme $GUID_HIGHPERF) { $GUID_HIGHPERF } else { $GUID_BALANCED }
     $r = Use-OwnScheme $GUID_CS_ULT $base 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf' -Tune @(
         @('AC', 'SUB_PROCESSOR', 'PROCTHROTTLEMIN', 100),
@@ -853,7 +853,7 @@ function Action-UltraPerf {
     )
     if ($r) {
         Set-ProcessorIdleAllowed $GUID_CS_ULT
-        Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה מקבילה; מהירות מלאה כשהמחשב מחובר לחשמל).'
+        Write-Ok 'מצב ביצועים אולטימטיביים הופעל (תוכנית מקבילה; מהירות מלאה כשהמחשב מחובר לחשמל).'
     } else {
         Write-Err 'לא הצלחתי להפעיל מצב ביצועים אולטימטיביים במחשב הזה.'
     }
@@ -1410,7 +1410,7 @@ function Action-ProductKey {
 }
 
 function Action-NetworkReset {
-    if (-not (Confirm-Action -Title 'איפוס ערימת הרשת' -Lines @(
+    if (-not (Confirm-Action -Title 'איפוס הגדרות הרשת' -Lines @(
         'הפעולה תאפס את מחסנית הרשת: מטמון DNS, Winsock ו-TCP/IP.'
         ''
         'שימושי כשהאינטרנט מתנהג מוזר אחרי הסרת VPN או אנטי-וירוס.'
@@ -1519,7 +1519,7 @@ $groups = @{
         @{ Text = $TOGGLE_TEXT.ExtShow;                       Act = { Action-FileExtensions }; Key = 'Ext' }
     ) }
     net = @{ Title = 'רשת'; Items = @(
-        @{ Text = 'איפוס ערימת הרשת';                         Act = { Action-NetworkReset };  Hot = $true }
+        @{ Text = 'איפוס הגדרות הרשת';                         Act = { Action-NetworkReset };  Hot = $true }
         @{ Text = 'הצגת סיסמאות ה-Wi-Fi השמורות';             Act = { Action-WifiPasswords } }
     ) }
     sys = @{ Title = 'מערכת ורישוי'; Items = @(

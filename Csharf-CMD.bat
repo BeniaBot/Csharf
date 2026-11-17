@@ -61,24 +61,24 @@ CD /D "%~dp0"
 cls
 echo.
 rem Status is padded to a fixed width so the box edge cannot drift.
-set "currentStatus=  Œ‰‚˜"
+set "currentStatus=       Œ‰‚˜"
 for /f "tokens=1-9" %%a in ('powercfg /getactivescheme') do (
   for %%t in (%%a %%b %%c %%d %%e %%f %%g %%h %%i) do call :SETSTATE %%t
 )
-powercfg /getactivescheme | findstr /I "Ultimate" >nul && set "currentStatus=€˜ˆŒ…€"
+powercfg /getactivescheme | findstr /I "Ultimate" >nul && set "currentStatus=‰‰‰ˆŽ‰ˆŒ…€"
 echo ÉÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ»
 echo º                  ˆ‰˜”š                   º
 echo ÌÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ¹
-echo º      %currentStatus% :‰’…–‰ –Ž €–Ž ’‚˜‹      º
+echo º   %currentStatus% :‰’…–‰ –Ž €–Ž ’‚˜‹    º
 echo ÌÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ¹
 echo º  [1]          ‰„…‚ ‰’…–‰ –ŽŒ ˜’Ž   º
-echo º  [2]          €˜ˆŒ…€ ‰’…–‰ –ŽŒ ˜’Ž   º
+echo º  [2]    ‰‰‰ˆŽ‰ˆŒ…€ ‰’…–‰ –ŽŒ ˜’Ž   º
 echo º  [3]           †…€Ž ‰’…–‰ –ŽŒ „˜†‡   º
-echo º  [4]            ‰ƒ…‘‰ ‰…—‰… ‡ˆ™ ‰…‰”   º
+echo º  [4]      ‰ƒ…‘‰ š‹˜’Ž ‰…—‰… ‡ˆ™ ‰…‰”   º
 echo º  [5]      …—Ž ‰…‰” - „Žƒ˜š –Ž šš™„   º
 echo º  [6]              ™ƒ‡Ž „Žƒ˜š –Ž šŒ’”„   º
-echo º  [7]  „ƒ…’ ‡Œ…™ Œ’ š…‹…šŒ ˜…–‰— ˜…–   º
-echo º  [8]           Pro-Œ Home-Ž „‘˜‚ ‚…˜ƒ™   º
+echo º  [7]           š…‹…š„ Œ‹ šŽ‰™˜Œ ˜…–‰—   º
+echo º  [8]         Pro-Œ Home-Ž „˜…ƒ„Ž ‚…˜ƒ™   º
 echo º  [9]                     --- „€‰–‰ ---   º
 echo ÈÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ¼
 echo.
@@ -96,10 +96,10 @@ goto :HIGHPERF
 rem Matches the active scheme by GUID rather than by token position, which
 rem is locale-dependent - powercfg words its output differently per language.
 :SETSTATE
-if /i "%~1"=="8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" set "currentStatus=‰„…‚"
-if /i "%~1"=="c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0002" set "currentStatus=‰„…‚"
-if /i "%~1"=="381b4222-f694-41f0-9685-ff5bb260df2e" set "currentStatus= †…€Ž"
-if /i "%~1"=="c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001" set "currentStatus=€˜ˆŒ…€"
+if /i "%~1"=="8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" set "currentStatus=     ‰„…‚"
+if /i "%~1"=="c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0002" set "currentStatus=     ‰„…‚"
+if /i "%~1"=="381b4222-f694-41f0-9685-ff5bb260df2e" set "currentStatus=      †…€Ž"
+if /i "%~1"=="c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001" set "currentStatus=‰‰‰ˆŽ‰ˆŒ…€"
 goto :eof
 
 rem errorlevel 0 when the plan given is the active one.
@@ -135,7 +135,7 @@ goto :END_FAIL
 cls
 echo.
 echo ÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ
-echo  ...€˜ˆŒ…€ ‰’…–‰ –ŽŒ ˜’Ž
+echo  ...‰‰‰ˆŽ‰ˆŒ…€ ‰’…–‰ –ŽŒ ˜’Ž
 rem A copy made earlier is simply switched back on - never a second one.
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 && powercfg /setactive c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :ISACTIVE c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 && goto :END_OK
@@ -147,7 +147,7 @@ powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 c54a2f10-7e1b-4d6
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 && goto :ULT_NAME
 rem Step 2: blocked on this PC. Build an equivalent from High Performance,
 rem or from Balanced where even that is missing.
-echo  ...„Œ‰—Ž „Ž‰‹‘ „… - „†„ ™‡Ž „Ž…‘‡ š‰Ž™˜„ „Ž‰‹‘„
+echo  ...„Œ‰—Ž š‰‹…š „… - „†„ ™‡Ž „Ž…‘‡ š‰Ž™˜„ š‰‹…š„
 powercfg -duplicatescheme 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 || powercfg -duplicatescheme 381b4222-f694-41f0-9685-ff5bb260df2e c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 || goto :END_FAIL
@@ -281,7 +281,7 @@ goto :END_FAIL
 cls
 echo.
 echo ÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ
-echo  ...š…‹…š„ šŽ‰™˜Œ ˜…–‰— ˜…–
+echo  ...š…‹…š„ Œ‹ šŽ‰™˜Œ ˜…–‰— ˜–…‰
 set "vbsFile=%temp%\create_shortcut.vbs"
 > "%vbsFile%" echo Set WshShell = WScript.CreateObject^("WScript.Shell"^)
 >> "%vbsFile%" echo desktopPath = WshShell.SpecialFolders^("Desktop"^)

@@ -77,7 +77,7 @@ function ConvertTo-VisualHebrew {
 }
 
 if ($args -contains '-Test') {
-    foreach ($t in @('תפריט','שדרוג גרסה מ-Home ל-Pro','השבתת מצב תרדמה - פינוי מקום','בחר אפשרות (1-9): ','תפריט ההקשר (Windows 11)')) {
+    foreach ($t in @('תפריט','שדרוג מהדורה מ-Home ל-Pro','השבתת מצב תרדמה - פינוי מקום','בחר אפשרות (1-9): ','תפריט ההקשר (Windows 11)')) {
         '{0,-34} ->  {1}' -f $t, (ConvertTo-VisualHebrew $t)
     }
     return
@@ -219,25 +219,25 @@ A ':MENU'
 A 'cls'
 EB
 A 'rem Status is padded to a fixed width so the box edge cannot drift.'
-A ('set "currentStatus=' + (Vis 'רגיל').PadLeft(6) + '"')
+A ('set "currentStatus=' + (Vis 'רגיל').PadLeft(11) + '"')
 A 'for /f "tokens=1-9" %%a in (''powercfg /getactivescheme'') do ('
 A '  for %%t in (%%a %%b %%c %%d %%e %%f %%g %%h %%i) do call :SETSTATE %%t'
 A ')'
-A ('powercfg /getactivescheme | findstr /I "Ultimate" >nul && set "currentStatus=' + (Vis 'אולטרא').PadLeft(6) + '"')
+A ('powercfg /getactivescheme | findstr /I "Ultimate" >nul && set "currentStatus=' + (Vis 'אולטימטיביים').PadLeft(11) + '"')
 Top
 Centre (Vis 'תפריט')
 Mid
-# 6 + 6 (currentStatus is padded to 6) + 1 + 23 + 6 = 42 at runtime
-Row ('      %currentStatus% ' + (Vis 'כרגע נמצא במצב ביצועים:') + '      ') $W 42
+# 3 + 11 (currentStatus is padded to 11) + 1 + 23 + 4 = 42 at runtime
+Row ('   %currentStatus% ' + (Vis 'כרגע נמצא במצב ביצועים:') + '    ') $W 42
 Mid
 Item '1' 'מעבר למצב ביצועים גבוהים'
-Item '2' 'מעבר למצב ביצועים אולטרא'
+Item '2' 'מעבר למצב ביצועים אולטימטיביים'
 Item '3' 'חזרה למצב ביצועים מאוזן'
-Item '4' 'פינוי שטח וניקוי יסודי'
+Item '4' 'פינוי שטח וניקוי מערכת יסודי'
 Item '5' 'השבתת מצב תרדמה - פינוי מקום'
 Item '6' 'הפעלת מצב תרדמה מחדש'
-Item '7' 'צור קיצור לתוכנות על שולחן עבודה'
-Item '8' 'שדרוג גרסה מ-Home ל-Pro'
+Item '7' 'קיצור לרשימת כל התוכנות'
+Item '8' 'שדרוג מהדורה מ-Home ל-Pro'
 Item '9' '--- יציאה ---'
 Bot
 EB
@@ -255,10 +255,10 @@ A ''
 A 'rem Matches the active scheme by GUID rather than by token position, which'
 A 'rem is locale-dependent - powercfg words its output differently per language.'
 A ':SETSTATE'
-A ("if /i `"%~1`"==`"$GH`" set `"currentStatus=" + (Vis 'גבוהים').PadLeft(6) + "`"")
-A ("if /i `"%~1`"==`"$CSH`" set `"currentStatus=" + (Vis 'גבוהים').PadLeft(6) + "`"")
-A ("if /i `"%~1`"==`"$GB`" set `"currentStatus=" + (Vis 'מאוזן').PadLeft(6) + "`"")
-A ("if /i `"%~1`"==`"$CSU`" set `"currentStatus=" + (Vis 'אולטרא').PadLeft(6) + "`"")
+A ("if /i `"%~1`"==`"$GH`" set `"currentStatus=" + (Vis 'גבוהים').PadLeft(11) + "`"")
+A ("if /i `"%~1`"==`"$CSH`" set `"currentStatus=" + (Vis 'גבוהים').PadLeft(11) + "`"")
+A ("if /i `"%~1`"==`"$GB`" set `"currentStatus=" + (Vis 'מאוזן').PadLeft(11) + "`"")
+A ("if /i `"%~1`"==`"$CSU`" set `"currentStatus=" + (Vis 'אולטימטיביים').PadLeft(11) + "`"")
 A 'goto :eof'
 A ''
 A 'rem errorlevel 0 when the plan given is the active one.'
@@ -298,7 +298,7 @@ A ':ULTRAPERF'
 A 'cls'
 EB
 Rule
-E 'מעבר למצב ביצועים אולטרא...'
+E 'מעבר למצב ביצועים אולטימטיביים...'
 A 'rem A copy made earlier is simply switched back on - never a second one.'
 A ("call :HASPLAN $CSU && powercfg /setactive $CSU >nul 2>&1")
 A ("call :ISACTIVE $CSU && goto :END_OK")
@@ -310,7 +310,7 @@ A ("powercfg -duplicatescheme $GU $CSU >nul 2>&1")
 A ("call :HASPLAN $CSU && goto :ULT_NAME")
 A 'rem Step 2: blocked on this PC. Build an equivalent from High Performance,'
 A 'rem or from Balanced where even that is missing.'
-E 'הסכימה הרשמית חסומה במחשב הזה - בונה סכימה מקבילה...'
+E 'התוכנית הרשמית חסומה במחשב הזה - בונה תוכנית מקבילה...'
 A ("powercfg -duplicatescheme $GH $CSU >nul 2>&1")
 A ("call :HASPLAN $CSU || powercfg -duplicatescheme $GB $CSU >nul 2>&1")
 A ("call :HASPLAN $CSU || goto :END_FAIL")
@@ -455,7 +455,7 @@ A ':CREATE_SHORTCUT'
 A 'cls'
 EB
 Rule
-E 'צור קיצור לרשימת התוכנות...'
+E 'יוצר קיצור לרשימת כל התוכנות...'
 A 'set "vbsFile=%temp%\create_shortcut.vbs"'
 A '> "%vbsFile%" echo Set WshShell = WScript.CreateObject^("WScript.Shell"^)'
 A '>> "%vbsFile%" echo desktopPath = WshShell.SpecialFolders^("Desktop"^)'
