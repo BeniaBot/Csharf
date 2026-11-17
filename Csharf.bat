@@ -51,7 +51,7 @@ exit /b 1
 #  Csharf - GUI edition
 # ============================================================================
 
-$CSHARF_VERSION = '2.3'
+$CSHARF_VERSION = '2.4'
 
 $ErrorActionPreference = 'Continue'
 
@@ -1268,7 +1268,8 @@ function Action-UpgradePro {
     if (-not (Confirm-Action -Title 'שדרוג מהדורה ל-Pro' -Lines @(
         "המהדורה הנוכחית: $($ed.ProductName)  ·  $($ed.EditionID)"
         ''
-        'הפעולה תשנה את מהדורת Windows ל-Pro ותפעיל את המחשב מחדש.'
+        'הפעולה תשנה את מהדורת Windows ל-Pro.'
+        'מיד בסיום Windows יפעיל את המחשב מחדש בעצמו - ואת זה כבר אי אפשר לעצור.'
         'שמור וסגור את כל המסמכים הפתוחים לפני שתמשיך.'
         ''
         'שים לב: שינוי המהדורה אינו הפעלה (Activation).'
@@ -1306,18 +1307,25 @@ function Action-UpgradePro {
         foreach ($svc in $restore.Keys) { & sc.exe config $svc start= disabled 2>&1 | Out-Null }
     }
     if ($code -ne 0) {
-        $shown = if ($null -eq $code) { 'n/a' } else { $code }
-        Write-Err "שינוי המהדורה נכשל (קוד $shown). ודא חיבור לאינטרנט ונסה שוב."
+        # No "check the internet" here: on a clean Windows 11 Home with no
+        # network adapter at all, the change went through fine.
+        $shown = if ($null -eq $code) { 'n/a' } else { '0x{0:X8}' -f $code }
+        Write-Err "שינוי המהדורה נכשל (קוד $shown). לא בוצע שינוי."
         return
     }
 
-    Write-Ok 'תהליך שינוי המהדורה החל. נדרשת הפעלה מחדש להשלמתו.'
-    if (Show-RebootCountdown) {
-        Write-Log 'מפעיל מחדש...'
-        & shutdown /r /t 5 /c 'שדרוג מהדורה ל-Pro - המחשב מופעל מחדש.' 2>&1 | Out-Null
-    } else {
-        Write-Warn 'ההפעלה מחדש בוטלה. השדרוג יושלם בהפעלה מחדש הבאה.'
-    }
+    # Measured three times on a clean Windows 11 Home (26300): changepk itself
+    # starts a restart about 20 seconds after it returns, and "shutdown /a"
+    # two seconds later answers "A system shutdown is in progress" - it cannot
+    # be stopped. Up to 2.3 this showed a 15-second countdown with a cancel
+    # button and then said "restart cancelled, the change completes at the
+    # next restart" - while Windows went down regardless. So: no countdown,
+    # no cancel - the question before was the real decision. Our own restart
+    # request stays as a fallback for a build where changepk leaves the
+    # restart to the user; where one is already under way it is refused, and
+    # that is fine.
+    Write-Ok 'שינוי המהדורה הוחל. Windows יפעיל את המחשב מחדש בעוד כמה שניות כדי להשלים אותו.'
+    & shutdown.exe /r /t 15 /c 'שדרוג מהדורה ל-Pro - המחשב מופעל מחדש.' 2>&1 | Out-Null
 }
 
 # ---------------------------------------------------------------------------
@@ -1603,7 +1611,14 @@ function Action-WifiPasswords {
         Start-Tool 'netsh.exe' @('wlan','export','profile','key=clear',"folder=$tmp") | Out-Null
         $files = Get-ChildItem -LiteralPath $tmp -Filter *.xml -ErrorAction SilentlyContinue
         if (-not $files) {
-            Write-Warn 'לא נמצאו פרופילי Wi-Fi שמורים.'
+            # Without the WLAN service netsh exports nothing at all - say why,
+            # rather than "nothing saved" on a PC that simply has no Wi-Fi.
+            $svc = Get-Service -Name 'wlansvc' -ErrorAction SilentlyContinue
+            if (-not $svc -or $svc.Status -ne 'Running') {
+                Write-Warn 'שירות ה-Wi-Fi של Windows לא פועל במחשב הזה (לרוב כי אין בו Wi-Fi), ולכן אין סיסמאות להציג.'
+            } else {
+                Write-Warn 'לא נמצאו פרופילי Wi-Fi שמורים.'
+            }
             return
         }
         $found = 0
@@ -1618,7 +1633,15 @@ function Action-WifiPasswords {
         }
         Write-Log "נמצאו $found רשתות עם סיסמה שמורה." $C_DIM
     } finally {
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        # The exported files hold the passwords in plain text, so this folder
+        # must not survive. Directory.Delete, not Remove-Item: %TEMP% is an
+        # 8.3 path under a user name in Hebrew, and Remove-Item refused that
+        # on a clean Windows 11 ("C:\Users\0AC8~1 does not exist") - the
+        # folder stayed behind and the log ended in an error.
+        try { [System.IO.Directory]::Delete($tmp, $true) } catch { }
+        if (Test-Path -LiteralPath $tmp) {
+            Write-Warn "לא הצלחתי למחוק את התיקייה הזמנית עם הסיסמאות. כדאי למחוק אותה ידנית: $tmp"
+        }
     }
 }
 
@@ -1629,11 +1652,30 @@ function Action-ReservedStorage {
         return
     }
     Write-Log 'בודק את מצב האחסון השמור...'
-    $code = Start-Tool 'dism.exe' @('/Online','/Set-ReservedStorageState','/State:Disabled')
+    # Up to 2.3 this went straight to "disable" and said "freed after the next
+    # restart" every time - also when it had been off for months, and on a
+    # clean Windows 11 the ~6.3 GB came back at once, without a restart.
+    # So: read the state first, and report the space actually freed.
+    $state = ''
+    try {
+        if (Get-Command 'Get-WindowsReservedStorageState' -ErrorAction SilentlyContinue) {
+            $state = [string](Get-WindowsReservedStorageState -ErrorAction Stop).ReservedStorageState
+        }
+    } catch { }
+    if ($state -match 'Disabled') {
+        Write-Ok 'האחסון השמור כבר מבוטל במחשב הזה - אין מה לשחרר.'
+        return
+    }
+    $sys    = ([string]$env:SystemDrive).TrimEnd(':')
+    $before = Get-FreeSpaceBytes $sys
+    $code   = Start-Tool 'dism.exe' @('/Online','/Set-ReservedStorageState','/State:Disabled')
     if ($code -eq 0) {
-        Write-Ok 'האחסון השמור בוטל. השטח משתחרר לאחר ההפעלה מחדש הבאה.'
+        $freed = (Get-FreeSpaceBytes $sys) - $before
+        if ($freed -ge 100MB) { Write-Ok ('האחסון השמור בוטל, ושוחררו {0}.' -f (Format-Size $freed)) }
+        else                  { Write-Ok 'האחסון השמור בוטל.' }
     } else {
-        Write-Warn "לא ניתן לבטל כעת (קוד $code). זה קורה כשיש עדכוני Windows בהמתנה - השלם אותם ונסה שוב."
+        $shown = if ($null -eq $code) { 'לא ידוע' } else { '0x{0:X8}' -f $code }
+        Write-Warn "לא ניתן לבטל כעת (קוד $shown). זה קורה למשל כשעדכון של Windows נמצא באמצע התקנה - נסו שוב אחריו."
     }
 }
 

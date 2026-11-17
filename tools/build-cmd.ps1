@@ -142,7 +142,7 @@ function Item { param([string]$n, [string]$text)
 }
 function Rule { A ('echo ' + ([string][char]0x2550) * 43) }
 
-$VERSION = '2.3'
+$VERSION = '2.4'
 $GH = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $GB = '381b4222-f694-41f0-9685-ff5bb260df2e'
 $GU = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
@@ -533,7 +533,8 @@ A 'set "CPK=%SystemRoot%\System32\changepk.exe"'
 A 'if exist "%SystemRoot%\Sysnative\changepk.exe" set "CPK=%SystemRoot%\Sysnative\changepk.exe"'
 A 'if not exist "%CPK%" goto :PRO_NO_TOOL'
 Rule
-E 'הפעולה תשנה את מהדורת Windows ל-Pro ותפעיל את המחשב מחדש.'
+E 'הפעולה תשנה את מהדורת Windows ל-Pro.'
+E 'מיד בסיום Windows יפעיל את המחשב מחדש בעצמו - אי אפשר לעצור זאת.'
 E 'שמור וסגור את כל המסמכים הפתוחים לפני שתמשיך.'
 E 'שים לב: זהו שינוי מהדורה בלבד, לא הפעלת רישיון.'
 E 'לאחר ההפעלה מחדש עדיין יידרש רישיון Pro תקף.'
@@ -550,25 +551,18 @@ A '"%CPK%" /productkey VK7JG-NPHTM-C97JM-9MPGT-3V66T'
 A 'if not "%errorlevel%"=="0" goto :PRO_FAILED'
 EB
 Rule
-E 'שינוי המהדורה התחיל. נדרשת הפעלה מחדש כדי להשלים אותו.'
-E 'המחשב יופעל מחדש תוך 15 שניות.'
-E 'לביטול ההפעלה מחדש - הקש 0.'
+E 'שינוי המהדורה הוחל. Windows יפעיל את המחשב מחדש'
+E 'בעוד כמה שניות כדי להשלים אותו.'
 Rule
 EB
-A 'rem A digit, not a letter: with the Hebrew keyboard layout active the X key'
-A 'rem types a Hebrew letter that "choice /c X" never accepts, so in 1.0 the'
-A 'rem countdown could not be cancelled at all in that layout.'
-A 'for /l %%i in (15,-1,1) do ('
-A ('  echo  ' + (VisWith 'נותרו' '%%i' 'שניות עד להפעלה מחדש... הקש 0 לביטול'))
-A '  choice /c 01 /n /t 1 /d 1 >nul'
-A '  if not errorlevel 2 goto :PRO_REBOOT_CANCELLED'
-A ')'
-A 'shutdown /r /t 5'
-A 'exit /b'
-A ''
-A ':PRO_REBOOT_CANCELLED'
-EB
-E 'ההפעלה מחדש בוטלה. השדרוג יושלם בהפעלה מחדש הבאה.'
+A 'rem No countdown and no cancel key any more. Measured on a clean Windows 11'
+A 'rem Home: changepk starts the restart itself about 20 seconds after it'
+A 'rem returns, and "shutdown /a" then answers "a system shutdown is in'
+A 'rem progress". Up to 2.3 a "0" here printed "restart cancelled" while'
+A 'rem Windows went down anyway. Our own request stays as a fallback for a build'
+A 'rem where changepk leaves the restart to the user; refused when one is'
+A 'rem already under way, which is fine.'
+A 'shutdown /r /t 15 >nul 2>&1'
 A 'goto :END_OK'
 A ':PRO_ALREADY'
 E 'מערכת ההפעלה כבר במהדורת Pro. אין צורך בשינוי.'
@@ -581,7 +575,7 @@ E 'changepk.exe לא נמצא. שינוי מהדורה אינו נתמך במע�
 A 'goto :END_FAIL'
 A ':PRO_FAILED'
 EB
-E 'שינוי המהדורה נכשל. בדוק חיבור לאינטרנט ונסה שוב.'
+E 'שינוי המהדורה נכשל. לא בוצע שינוי.'
 A 'goto :END_FAIL'
 A ''
 
