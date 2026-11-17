@@ -75,7 +75,7 @@ $winOrg = New-Object System.Drawing.Point($form.Left, $form.Top)
 $offX = $origin.X - $form.Left; $offY = $origin.Y - $form.Top
 $leftHeavy = 0; $measured = 0
 foreach ($b in $buttons) {
-    if ($b.Text -eq 'יציאה') { continue }
+    if ($b -eq $bExit) { continue }   # centred on purpose
     $r = $b.RectangleToScreen($b.ClientRectangle)
     $x0 = $r.X - $origin.X + $offX; $y0 = $r.Y - $origin.Y + $offY
     if ($x0 -lt 0 -or $y0 -lt 0 -or ($x0 + $r.Width) -gt $bmp.Width -or ($y0 + $r.Height) -gt $bmp.Height) { continue }
