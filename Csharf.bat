@@ -51,7 +51,7 @@ exit /b 1
 #  Csharf - GUI edition
 # ============================================================================
 
-$CSHARF_VERSION = '2.2'
+$CSHARF_VERSION = '2.3'
 
 $ErrorActionPreference = 'Continue'
 

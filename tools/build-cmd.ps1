@@ -142,7 +142,7 @@ function Item { param([string]$n, [string]$text)
 }
 function Rule { A ('echo ' + ([string][char]0x2550) * 43) }
 
-$VERSION = '2.2'
+$VERSION = '2.3'
 $GH = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $GB = '381b4222-f694-41f0-9685-ff5bb260df2e'
 $GU = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
