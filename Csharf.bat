@@ -45,14 +45,52 @@ exit /b 1
 
 #PSBODY-START
 # ============================================================================
-#  Csharf All-In-One - GUI
+#  Csharf - GUI edition
 # ============================================================================
+
+$CSHARF_VERSION = '2.1'
+
+$ErrorActionPreference = 'Continue'
+
+# This process has no console to print to, so anything that goes wrong before
+# the window is up would be completely invisible: the user double-clicks and
+# nothing ever happens. Say it out loud instead.
+trap {
+    $fatal = "Csharf נתקל בשגיאה ולא יכול להמשיך:`r`n`r`n$($_.Exception.Message)"
+    try {
+        [void][System.Windows.Forms.MessageBox]::Show($fatal, 'Csharf',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
+    } catch {
+        try { [void](New-Object -ComObject WScript.Shell).Popup($fatal, 0, 'Csharf', 16) } catch { }
+    }
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+
+# ------------------------------------------------------------ sharp text ----
+# Without this Windows treats the process as unaware of display scaling,
+# draws the window at 100% and stretches the bitmap - blurry at 125% and up,
+# which is what almost every laptop runs at. It has to happen before the
+# first window exists. Built through Reflection.Emit rather than Add-Type so
+# no C# compiler is started (slower, and blocked on some locked-down PCs).
+# Failing here is harmless: the window is merely soft again.
+try {
+    $asmName = New-Object System.Reflection.AssemblyName('CsharfNative')
+    $asm     = [AppDomain]::CurrentDomain.DefineDynamicAssembly($asmName, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $tb      = $asm.DefineDynamicModule('CsharfNative').DefineType('CsharfNative.User32', 'Public,Class')
+    $mb      = $tb.DefinePInvokeMethod('SetProcessDPIAware', 'user32.dll',
+                   [System.Reflection.MethodAttributes]'Public,Static,PinvokeImpl',
+                   [System.Reflection.CallingConventions]::Standard, [bool], [Type[]]@(),
+                   [System.Runtime.InteropServices.CallingConvention]::Winapi,
+                   [System.Runtime.InteropServices.CharSet]::Auto)
+    $mb.SetImplementationFlags($mb.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig)
+    [void]$tb.CreateType().GetMethod('SetProcessDPIAware').Invoke($null, @())
+} catch { }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
-
-$ErrorActionPreference = 'Continue'
 
 # ------------------------------------------------------------- elevation ----
 # WindowsPrincipal is the canonical admin test: no registry hive and no service
@@ -62,6 +100,24 @@ $ErrorActionPreference = 'Continue'
 # exactly one UAC prompt.
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+$MUTEX_RUNNING = 'Local\Csharf-SingleInstance'   # held by the open window
+$MUTEX_LAUNCH  = 'Local\Csharf-Launch'           # held while a UAC prompt is up
+
+function Test-CsharfRunning {
+    # Whether the window is already open. The elevated copy owns that mutex,
+    # so from here it usually answers "access denied" - which also means it
+    # exists.
+    try {
+        $m = [System.Threading.Mutex]::OpenExisting($MUTEX_RUNNING)
+        $m.Dispose()
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        return $false
+    } catch {
+        return $true
+    }
+}
 
 if (-not $isAdmin) {
     if ($args -contains 'Elevated') {
@@ -74,14 +130,59 @@ if (-not $isAdmin) {
         Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         exit 1
     }
+
+    # One UAC prompt per start, however many times the file is opened.
+    # From the double-click to the prompt takes two or three seconds in which
+    # nothing seems to happen, and a second double-click in that time used to
+    # raise a second, identical prompt. Now a start that finds another one
+    # waiting for its prompt - or the window already open - just leaves.
+    $launch = New-Object System.Threading.Mutex($false, $MUTEX_LAUNCH)
+    $mine   = $false
+    try { $mine = $launch.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $mine = $true }
+    if (-not $mine -or (Test-CsharfRunning)) {
+        try { [void](New-Object -ComObject WScript.Shell).AppActivate('Csharf') } catch { }
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+        exit
+    }
+
     try {
-        Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -ErrorAction Stop `
+        # The script path carries its own quotes: Start-Process joins
+        # -ArgumentList with plain spaces and adds none, so a profile folder
+        # with a space in its name ("C:\Users\Dana Levi\...") would split the
+        # path in two and the elevated copy would die before it could say so.
+        $elevated = Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -PassThru -ErrorAction Stop `
             -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA',
-                            '-WindowStyle','Hidden','-File', $PSCommandPath, 'Elevated') | Out-Null
+                            '-WindowStyle','Hidden','-File', ('"{0}"' -f $PSCommandPath), 'Elevated')
+        # Keep the launch lock until the elevated copy holds its own, so there
+        # is no moment in which a further click would prompt again.
+        $until = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $until -and -not (Test-CsharfRunning)) {
+            $gone = $false
+            try { $gone = $elevated.HasExited } catch { }
+            if ($gone) { break }
+            Start-Sleep -Milliseconds 100
+        }
     } catch {
         # UAC dismissed - clean up and go quietly.
         Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     }
+    try { $launch.ReleaseMutex() } catch { }
+    exit
+}
+
+# -------------------------------------------------------- single instance ----
+# One window at a time. Two copies driving DISM or powercfg against each other
+# help nobody, and a second double-click while the first copy is still loading
+# is the usual way to end up with two of them stacked exactly on top of each
+# other.
+$script:Mutex = New-Object System.Threading.Mutex($false, $MUTEX_RUNNING)
+$ownsMutex = $false
+try { $ownsMutex = $script:Mutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }   # previous copy was killed
+if (-not $ownsMutex) {
+    try { [void](New-Object -ComObject WScript.Shell).AppActivate('Csharf') } catch { }
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     exit
 }
 
@@ -90,6 +191,14 @@ $GUID_BALANCED = '381b4222-f694-41f0-9685-ff5bb260df2e'
 $GUID_HIGHPERF = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $GUID_SAVER    = 'a1841308-3541-4fab-bc81-f71556f20b4a'
 $GUID_ULTIMATE = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+# The two plans this tool may create get FIXED ids of their own. `powercfg
+# -duplicatescheme` without a destination invents a fresh id on every call,
+# and the versions before 2.1 called it on every click - one extra plan per
+# press, dozens over time, and on Modern Standby hardware none of them even
+# show in `powercfg /list`. A fixed destination can only ever exist once.
+$GUID_CS_ULT   = 'c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001'
+$GUID_CS_HIGH  = 'c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0002'
+$REG_SCHEMES   = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes'
 # Microsoft's published generic key for a Home -> Pro edition change.
 # It changes the edition; it does NOT activate. A real Pro licence /
 # digital entitlement is still required afterwards.
@@ -106,10 +215,33 @@ $C_WARN   = [System.Drawing.Color]::FromArgb(255,190,60)
 $C_ERR    = [System.Drawing.Color]::FromArgb(255,95,95)
 $C_BTN    = [System.Drawing.Color]::FromArgb(32,36,32)
 
-$F_UI     = New-Object System.Drawing.Font('Segoe UI', 10)
-$F_BOLD   = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$F_TITLE  = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
-$F_MONO   = New-Object System.Drawing.Font('Consolas', 9.5)
+# ---------------------------------------------------------------- scaling ----
+# Every size below is written in logical pixels - what it would be at 100% -
+# and multiplied by the display scale through S. Fonts are given in pixels for
+# the same reason, so text and boxes always grow together.
+$script:UiScale  = 1.0
+try {
+    $gfx = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+    $script:UiScale = [double]($gfx.DpiX / 96.0)
+    $gfx.Dispose()
+} catch { }
+# The screen the user is looking at - the one the double-click happened on.
+$script:WorkArea = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+
+function S {
+    param([double]$n)
+    return [int][Math]::Round($n * $script:UiScale)
+}
+function New-UiFont {
+    param([string]$Family, [double]$Px, [System.Drawing.FontStyle]$Style = [System.Drawing.FontStyle]::Regular)
+    return New-Object System.Drawing.Font($Family, [single]($Px * $script:UiScale), $Style,
+                                          [System.Drawing.GraphicsUnit]::Pixel)
+}
+
+$F_UI     = New-UiFont 'Segoe UI' 13.5
+$F_BOLD   = New-UiFont 'Segoe UI' 13.5 ([System.Drawing.FontStyle]::Bold)
+$F_TITLE  = New-UiFont 'Segoe UI' 20   ([System.Drawing.FontStyle]::Bold)
+$F_MONO   = New-UiFont 'Consolas' 12.5
 
 # ============================================================================
 #  Helpers
@@ -123,22 +255,61 @@ function Get-ActiveScheme {
     $guid = ''
     $name = ''
     if ($out -match $RX_GUID) { $guid = $Matches[1] }
-    if ($out -match '\(([^)]*)\)\s*$') { $name = $Matches[1].Trim() }
+    # Greedy on purpose: a plan called "Ultimate Performance (Csharf)" is
+    # printed as "(Ultimate Performance (Csharf))", and a pattern that stops at
+    # the first ")" finds no name at all.
+    if ($out -match '\((.*)\)\s*$') { $name = $Matches[1].Trim() }
     [PSCustomObject]@{ Guid = $guid; Name = $name }
 }
 
 function Get-SchemeLabel {
     $s = Get-ActiveScheme
     switch -Regex ($s.Guid) {
-        "^$GUID_ULTIMATE$" { return 'ביצועים אולטימטיביים' }
-        "^$GUID_HIGHPERF$" { return 'ביצועים גבוהים' }
-        "^$GUID_BALANCED$" { return 'מאוזן' }
-        "^$GUID_SAVER$"    { return 'חיסכון בסוללה' }
+        "^($GUID_ULTIMATE|$GUID_CS_ULT)$"  { return 'ביצועים אולטימטיביים' }
+        "^($GUID_HIGHPERF|$GUID_CS_HIGH)$" { return 'ביצועים גבוהים' }
+        "^$GUID_BALANCED$"                 { return 'מאוזן' }
+        "^$GUID_SAVER$"                    { return 'חיסכון בסוללה' }
     }
-    # A cloned Ultimate scheme keeps its own GUID - fall back to the name.
+    # A plan left behind by an older version keeps a random id - go by name.
     if ($s.Name -match 'Ultimate|אולטימ') { return 'ביצועים אולטימטיביים (מותאם)' }
     if ($s.Name) { return $s.Name }
     return 'לא ידוע'
+}
+
+function Test-Scheme {
+    param([string]$Guid)
+    return (Test-Path -LiteralPath (Join-Path $REG_SCHEMES $Guid))
+}
+
+function Get-AllSchemes {
+    # Read from the registry, not from `powercfg /list`: on Modern Standby
+    # hardware the list shows Balanced plus whatever is active and hides every
+    # other plan that exists.
+    $all = @()
+    Get-ChildItem -LiteralPath $REG_SCHEMES -ErrorAction SilentlyContinue | ForEach-Object {
+        $p = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        $all += [PSCustomObject]@{
+            Guid        = ([string]$_.PSChildName).ToLower()
+            Name        = [string]$p.FriendlyName
+            Description = [string]$p.Description
+        }
+    }
+    return $all
+}
+
+function Set-ActiveScheme {
+    # True only if the plan really became the active one.
+    param([string]$Guid)
+    & powercfg.exe /setactive $Guid 2>&1 | Out-Null
+    return ((Get-ActiveScheme).Guid -eq $Guid)
+}
+
+function Copy-Scheme {
+    param([string]$From, [string]$To, [string]$Name, [string]$Description)
+    & powercfg.exe -duplicatescheme $From $To 2>&1 | Out-Null
+    if (-not (Test-Scheme $To)) { return $false }
+    & powercfg.exe -changename $To $Name $Description 2>&1 | Out-Null
+    return $true
 }
 
 function Get-HibernateEnabled {
@@ -196,11 +367,15 @@ function Resolve-SystemExe {
 }
 
 function Format-Size {
+    # Starts with an invisible left-to-right mark. Inside a Hebrew line,
+    # "54.08 GB" is otherwise split by the bidi algorithm into a number and a
+    # word and shown as "GB 54.08".
     param([double]$Bytes)
-    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
-    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
-    if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
-    return ('{0:N0} B' -f $Bytes)
+    $lrm = [string][char]0x200E
+    if ($Bytes -ge 1GB) { return $lrm + ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return $lrm + ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return $lrm + ('{0:N0} KB' -f ($Bytes / 1KB)) }
+    return $lrm + ('{0:N0} B' -f $Bytes)
 }
 
 function Clear-FolderContents {
@@ -211,6 +386,7 @@ function Clear-FolderContents {
     $freed = 0
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
     Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Test-Stop          # outside the try below, which swallows everything
         try {
             $size = 0
             if ($_.PSIsContainer) {
@@ -234,65 +410,173 @@ function Start-Tool {
     # blocks the UI thread, which matters a lot for DISM and SFC - those can
     # run for half an hour and the form would look hung the whole time.
     # Returns the exit code, or $null if the process could not be started.
-    param([string]$FilePath, [string[]]$ArgumentList)
+    #
+    # While it waits, the bottom button turns into "stop" (see Update-ExitButton).
+    # Pressing it kills the tool together with its children - DISM and cleanmgr
+    # do their real work in child processes - and unwinds the whole action
+    # through an OperationCanceledException that Invoke-Action reports. Without
+    # this a tool that hangs would lock the window for good, because closing
+    # is refused while an action runs.
+    #
+    # -NoStop: for tools that must never be cut off half way (the edition
+    # change). The window still stays alive; it just offers no stop button.
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$NoStop)
+    Test-Stop
     try {
-        $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList `
+        $p = Start-Process -FilePath $FilePath -ArgumentList (Join-ProcessArguments $ArgumentList) `
                            -WindowStyle Hidden -PassThru -ErrorAction Stop
+        # Touch the handle now. A Process object that never opened one while
+        # the process was alive reports an empty ExitCode afterwards.
+        $null = $p.Handle
     } catch {
         return $null
     }
-    while (-not $p.HasExited) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 150
+    $script:CanStop = -not $NoStop
+    try {
+        while (-not $p.HasExited) {
+            Update-ExitButton
+            [System.Windows.Forms.Application]::DoEvents()
+            if ($script:StopRequested -and -not $NoStop) {
+                & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null
+                [void]$p.WaitForExit(5000)
+                throw (New-Object System.OperationCanceledException)
+            }
+            Start-Sleep -Milliseconds 40
+        }
+    } finally {
+        $script:CanStop = $false
     }
     return $p.ExitCode
+}
+
+function Join-ProcessArguments {
+    # Start-Process glues an argument array together with bare spaces, so any
+    # argument that contains one - a Desktop inside "OneDrive - Company", a
+    # user folder with a space - arrives at the tool cut in two. Quote those
+    # the way the C runtime splits a command line back up: backslashes are
+    # literal unless they precede a quote.
+    param([string[]]$Arguments)
+    $parts = foreach ($a in $Arguments) {
+        if ($a -ne '' -and $a -notmatch '[\s"]') { $a; continue }
+        $q = [regex]::Replace($a, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+        $q = [regex]::Replace($q, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+        '"' + $q + '"'
+    }
+    return ($parts -join ' ')
+}
+
+function Test-Stop {
+    # For the stretches of an action that run in this process rather than in
+    # an external tool: keeps the window alive and honours a stop request.
+    [System.Windows.Forms.Application]::DoEvents()
+    if ($script:StopRequested) { throw (New-Object System.OperationCanceledException) }
+}
+
+function Invoke-Background {
+    # Runs a script block on a second thread and keeps pumping the window
+    # until it returns. For slow cmdlets that have no external process to
+    # wait on (Checkpoint-Computer can take a minute); calling them directly
+    # would freeze the window and Windows would mark it "not responding".
+    param([scriptblock]$Script, [object[]]$Arguments = @())
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddScript($Script.ToString())
+        foreach ($a in $Arguments) { [void]$ps.AddArgument($a) }
+        $handle = $ps.BeginInvoke()
+        while (-not $handle.IsCompleted) {
+            Update-ExitButton
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        return $ps.EndInvoke($handle)
+    } finally {
+        $ps.Dispose()
+    }
 }
 
 # ============================================================================
 #  Form
 # ============================================================================
+#
+# One vertical stack: title, status, menu, log, bottom button. The menu row
+# is exactly as tall as its buttons need and the log takes whatever is left:
+# a bigger window means more log, and on a short screen the log gives way
+# first, so no button is pushed out of sight while there is still log to
+# squeeze. The real sizes are set at the very bottom of this file ("Build the
+# menu"), once the captions have been measured.
+#
+# A note on TextAlign: under RightToLeft = Yes, WinForms reads "Left" as "the
+# side a line starts on". MiddleLeft is therefore what puts Hebrew against the
+# right edge; MiddleRight - what the versions before 2.1 used - pushes it to
+# the left.
 
 $form                 = New-Object System.Windows.Forms.Form
-$form.Text            = 'Csharf  -  כלי מערכת'
-# Two columns of grouped buttons. Tallest column is 3 headings + 9 buttons
-# = 3*36 + 9*40 = 468, plus title 46 + status 96 + exit 46 + log 170.
-$form.Size            = New-Object System.Drawing.Size(780, 880)
-$form.MinimumSize     = New-Object System.Drawing.Size(740, 620)
-$form.StartPosition   = 'CenterScreen'
+$form.Text            = "Csharf $CSHARF_VERSION  -  כלי מערכת"
+$form.AutoScaleMode   = 'None'          # scaled by hand, through S
+$form.StartPosition   = 'Manual'        # placed by hand, on the right screen
 $form.BackColor       = $C_BG
 $form.ForeColor       = $C_FG
 $form.Font            = $F_UI
 $form.RightToLeft     = 'Yes'
 $form.RightToLeftLayout = $true
 
+$H_TITLE  = S 46
+$H_STATUS = S 82
+$H_BOTTOM = S 50
+$H_LOG    = S 150      # preferred height; the first thing to give on a short screen
+$H_LOGMIN = S 88
+$PAD      = S 14       # the one side margin everything lines up on
+
+$root                 = New-Object System.Windows.Forms.TableLayoutPanel
+$root.Dock            = 'Fill'
+$root.ColumnCount     = 1
+$root.RowCount        = 5
+$root.Margin          = New-Object System.Windows.Forms.Padding(0)
+[void]$root.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $H_TITLE)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $H_STATUS)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, (S 300))))   # menu: set for real below
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))        # log
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $H_BOTTOM)))
+$form.Controls.Add($root)
+
 $lblTitle             = New-Object System.Windows.Forms.Label
 $lblTitle.Text        = '⚡  תפריט כלי מערכת  ⚡'
 $lblTitle.Font        = $F_TITLE
 $lblTitle.ForeColor   = $C_FG
-$lblTitle.Dock        = 'Top'
-$lblTitle.Height      = 46
+$lblTitle.Dock        = 'Fill'
+$lblTitle.Margin      = New-Object System.Windows.Forms.Padding(0)
 $lblTitle.TextAlign   = 'MiddleCenter'
-$form.Controls.Add($lblTitle)
+$root.Controls.Add($lblTitle, 0, 0)
 
 # ---------------------------------------------------------- status strip ----
 $pnlStatus            = New-Object System.Windows.Forms.Panel
-$pnlStatus.Dock       = 'Top'
-$pnlStatus.Height     = 96
+$pnlStatus.Dock       = 'Fill'
+$pnlStatus.Margin     = New-Object System.Windows.Forms.Padding(0)
 $pnlStatus.BackColor  = $C_PANEL
-$pnlStatus.Padding    = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+$pnlStatus.Padding    = New-Object System.Windows.Forms.Padding($PAD, (S 6), $PAD, (S 6))
 
 $lblStatus            = New-Object System.Windows.Forms.Label
 $lblStatus.Dock       = 'Fill'
 $lblStatus.ForeColor  = $C_DIM
-$lblStatus.TextAlign  = 'MiddleRight'
+$lblStatus.TextAlign  = 'MiddleLeft'
 $pnlStatus.Controls.Add($lblStatus)
-$form.Controls.Add($pnlStatus)
+$root.Controls.Add($pnlStatus, 0, 1)
+
+# ------------------------------------------------------------------ menu ----
+# Scrolls as a last resort only: when even the minimum log does not leave the
+# buttons enough room (a very small screen, or a very high display scale).
+$pnlMenu              = New-Object System.Windows.Forms.Panel
+$pnlMenu.Dock         = 'Fill'
+$pnlMenu.Margin       = New-Object System.Windows.Forms.Padding(0)
+$pnlMenu.AutoScroll   = $true
+$root.Controls.Add($pnlMenu, 0, 2)
 
 # ------------------------------------------------------------------- log ----
 $pnlLog               = New-Object System.Windows.Forms.Panel
-$pnlLog.Dock          = 'Bottom'
-$pnlLog.Height        = 170
-$pnlLog.Padding       = New-Object System.Windows.Forms.Padding(12, 6, 12, 12)
+$pnlLog.Dock          = 'Fill'
+$pnlLog.Margin        = New-Object System.Windows.Forms.Padding(0)
+$pnlLog.Padding       = New-Object System.Windows.Forms.Padding($PAD, (S 8), $PAD, (S 2))
 
 $log                  = New-Object System.Windows.Forms.RichTextBox
 $log.Dock             = 'Fill'
@@ -300,52 +584,47 @@ $log.ReadOnly         = $true
 $log.BackColor        = [System.Drawing.Color]::FromArgb(8,8,8)
 $log.ForeColor        = $C_DIM
 $log.Font             = $F_MONO
-$log.BorderStyle      = 'FixedSingle'
+$log.BorderStyle      = 'None'
 $log.RightToLeft      = 'Yes'
 $log.DetectUrls       = $false
-$pnlLog.Controls.Add($log)
-$form.Controls.Add($pnlLog)
+# A one-pixel frame in the palette's own colour instead of the system's white
+# FixedSingle border, which glared against the dark window.
+$pnlLogFrame          = New-Object System.Windows.Forms.Panel
+$pnlLogFrame.Dock     = 'Fill'
+$pnlLogFrame.BackColor = [System.Drawing.Color]::FromArgb(60,70,60)
+$pnlLogFrame.Padding  = New-Object System.Windows.Forms.Padding(1)
+$pnlLogInner          = New-Object System.Windows.Forms.Panel
+$pnlLogInner.Dock     = 'Fill'
+$pnlLogInner.BackColor = $log.BackColor
+$pnlLogInner.Padding  = New-Object System.Windows.Forms.Padding((S 8), (S 6), (S 8), (S 6))
+$pnlLogInner.Controls.Add($log)
+$pnlLogFrame.Controls.Add($pnlLogInner)
+$pnlLog.Controls.Add($pnlLogFrame)
+$root.Controls.Add($pnlLog, 0, 3)
 
-# --------------------------------------------------------------- buttons ----
-# Exit button gets its own strip so it never scrolls away with the menu.
+# --------------------------------------------------------- bottom button ----
+# "Exit" while idle; the stop button while an action runs (Update-ExitButton).
+# It has a row of its own so it can never scroll away with the menu.
 $pnlExit              = New-Object System.Windows.Forms.Panel
-$pnlExit.Dock         = 'Bottom'
-$pnlExit.Height       = 46
-$pnlExit.Padding      = New-Object System.Windows.Forms.Padding(12, 6, 12, 6)
-$form.Controls.Add($pnlExit)
+$pnlExit.Dock         = 'Fill'
+$pnlExit.Margin       = New-Object System.Windows.Forms.Padding(0)
+$pnlExit.Padding      = New-Object System.Windows.Forms.Padding($PAD, (S 8), $PAD, (S 10))
 
-# Two side-by-side columns. Column 0 sits on the right under RightToLeftLayout.
-$pnlBtns              = New-Object System.Windows.Forms.TableLayoutPanel
-$pnlBtns.Dock         = 'Fill'
-$pnlBtns.ColumnCount  = 2
-$pnlBtns.RowCount     = 1
-$pnlBtns.AutoScroll   = $true
-$pnlBtns.Padding      = New-Object System.Windows.Forms.Padding(12, 6, 12, 0)
-[void]$pnlBtns.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
-[void]$pnlBtns.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
-$form.Controls.Add($pnlBtns)
-$pnlBtns.BringToFront()
-
-$pnlColR              = New-Object System.Windows.Forms.FlowLayoutPanel
-$pnlColR.Dock         = 'Fill'
-$pnlColR.FlowDirection = 'TopDown'
-$pnlColR.WrapContents = $false
-# The tallest column needs ~468px (see the Size comment above) but the form's
-# MinimumSize allows shrinking to 620px total, well under that once title/
-# status/log/exit are subtracted. Without AutoScroll, buttons past the bottom
-# edge are simply clipped with no way to reach them.
-$pnlColR.AutoScroll   = $true
-$pnlColR.Margin       = New-Object System.Windows.Forms.Padding(0)
-
-$pnlColL              = New-Object System.Windows.Forms.FlowLayoutPanel
-$pnlColL.Dock         = 'Fill'
-$pnlColL.FlowDirection = 'TopDown'
-$pnlColL.WrapContents = $false
-$pnlColL.AutoScroll   = $true
-$pnlColL.Margin       = New-Object System.Windows.Forms.Padding(0)
-
-$pnlBtns.Controls.Add($pnlColR, 0, 0)
-$pnlBtns.Controls.Add($pnlColL, 1, 0)
+$bExit               = New-Object System.Windows.Forms.Button
+$bExit.Text          = 'יציאה'
+$bExit.Dock          = 'Fill'
+$bExit.FlatStyle     = 'Flat'
+$bExit.BackColor     = [System.Drawing.Color]::FromArgb(20,20,20)
+$bExit.ForeColor     = $C_DIM
+$bExit.TextAlign     = 'MiddleCenter'
+$bExit.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(60,70,60)
+$bExit.Cursor        = 'Hand'
+$bExit.Add_Click({
+    if (-not $script:Busy)  { $form.Close() }
+    elseif ($script:CanStop) { $script:StopRequested = $true; Update-ExitButton }
+})
+$pnlExit.Controls.Add($bExit)
+$root.Controls.Add($pnlExit, 0, 4)
 
 # ============================================================================
 #  Logging / busy state
@@ -368,31 +647,55 @@ function Write-Err  { param([string]$t) Write-Log "✖  $t" $C_ERR }
 function Update-Status {
     $ed   = Get-CsharfEdition
     $hib  = if (Get-HibernateEnabled) { 'פעיל' } else { 'מושבת' }
-    $free = Format-Size (Get-FreeSpaceBytes 'C')
+    $sys  = ([string]$env:SystemDrive).TrimEnd(':')
+    $free = Format-Size (Get-FreeSpaceBytes $sys)
+    # Each label is Hebrew only and the value follows the colon. A label that
+    # mixes in a Latin word ("מהדורת Windows:") is torn apart by the bidi
+    # algorithm: the Latin half travels to the far end of the line together
+    # with the value. No square brackets either - they get mirrored.
     $lblStatus.Text = @(
         "מצב ביצועים נוכחי:  $(Get-SchemeLabel)"
-        # No square brackets here: they are bidi-neutral, so around Latin text
-        # inside an RTL line they get mirrored and land in the wrong place.
-        "מהדורת Windows:  $($ed.ProductName) $($ed.Display)  ·  $($ed.EditionID)"
-        "מצב תרדמה:  $hib          מקום פנוי בכונן C:  $free"
+        "מערכת ההפעלה:  $($ed.ProductName) $($ed.Display)  ·  $($ed.EditionID)"
+        "מצב תרדמה:  $hib          מקום פנוי בכונן המערכת:  $free"
     ) -join [Environment]::NewLine
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-$script:Busy = $false
+$script:Busy          = $false
+$script:BusySince     = $null
+$script:CanStop       = $false   # an external tool is running and may be killed
+$script:StopRequested = $false
+$script:CloseAfter    = $false   # the user asked to close while an action ran
+$script:MenuButtons   = New-Object System.Collections.Generic.List[System.Windows.Forms.Button]
+
+function Update-ExitButton {
+    # The bottom button doubles as progress display and stop control. Called
+    # from every wait loop; it only touches the control when the caption
+    # actually changes, so it can be called as often as the loop spins.
+    if (-not $script:Busy) {
+        $text = 'יציאה'; $color = $C_DIM; $enabled = $true
+    } else {
+        $el    = (Get-Date) - $script:BusySince
+        $clock = '{0:00}:{1:00}' -f [int][Math]::Floor($el.TotalMinutes), $el.Seconds
+        if ($script:StopRequested) { $text = "עוצר...   $clock";            $color = $C_DIM;  $enabled = $false }
+        elseif ($script:CanStop)   { $text = "עצירת הפעולה   $clock";      $color = $C_WARN; $enabled = $true  }
+        else                       { $text = "פועל, נא להמתין...   $clock"; $color = $C_DIM;  $enabled = $false }
+    }
+    if ($bExit.Text -ne $text)       { $bExit.Text = $text }
+    if ($bExit.ForeColor -ne $color) { $bExit.ForeColor = $color }
+    if ($bExit.Enabled -ne $enabled) { $bExit.Enabled = $enabled }
+}
+
 function Set-Busy {
     param([bool]$On)
     $script:Busy = $On
-    foreach ($col in @($pnlColR, $pnlColL)) {
-        foreach ($c in $col.Controls) {
-            if ($c -is [System.Windows.Forms.Button]) { $c.Enabled = -not $On }
-        }
-    }
-    # Exit lives in its own strip (pnlExit), outside the loop above - disable it
-    # explicitly too, or the window can be torn down mid-action (e.g. DISM/SFC
-    # repair, up to ~30 min) while Start-Tool's polling loop still references
-    # its controls.
-    $bExit.Enabled = -not $On
+    # A stop request belongs to the action it was made in. Cleared on both
+    # edges, so one can never leak into whatever runs next.
+    $script:StopRequested = $false
+    $script:CanStop       = $false
+    if ($On) { $script:BusySince = Get-Date }
+    foreach ($b in $script:MenuButtons) { $b.Enabled = -not $On }
+    Update-ExitButton
     $form.Cursor = if ($On) { 'WaitCursor' } else { 'Default' }
     [System.Windows.Forms.Application]::DoEvents()
 }
@@ -406,91 +709,122 @@ function Invoke-Action {
     # buttons must still come back. Otherwise one bad status refresh leaves
     # the whole window dead and the user has to restart it.
     try {
-        try { & $Body }       catch { Write-Err "שגיאה: $($_.Exception.Message)" }
+        try { & $Body }
+        catch [System.OperationCanceledException] { Write-Warn 'הפעולה נעצרה לפי בקשתך.' }
+        catch { Write-Err "שגיאה: $($_.Exception.Message)" }
         try { Update-Status } catch { Write-Warn 'לא הצלחתי לרענן את שורת הסטטוס.' }
     } finally {
         Set-Busy $false
     }
+    if ($script:CloseAfter) { $form.Close() }
 }
 
 # ============================================================================
 #  Actions
 # ============================================================================
 
-function Action-HighPerf {
-    & powercfg -duplicatescheme $GUID_HIGHPERF 2>&1 | Out-Null
-    & powercfg /setactive $GUID_HIGHPERF 2>&1 | Out-Null
-    if ((Get-ActiveScheme).Guid -eq $GUID_HIGHPERF) {
-        Write-Ok 'מצב ביצועים גבוהים הופעל בהצלחה.'
-    } else {
-        Write-Err 'לא הצלחתי להפעיל את מצב הביצועים הגבוהים.'
+function Use-OwnScheme {
+    # Activates one of the two plans this tool owns, creating it first from
+    # $From when it does not exist yet. Exactly one copy can ever exist - the
+    # id is fixed - so pressing the button again just switches back to it.
+    # A copy that exists but will not activate (half-written by a crash) is
+    # removed and made again.
+    param([string]$Guid, [string]$From, [string]$Name, [string]$Description, [object[]]$Tune = @())
+    if ((Test-Scheme $Guid) -and (Set-ActiveScheme $Guid)) { return 'existing' }
+    if (Test-Scheme $Guid) { & powercfg.exe /delete $Guid 2>&1 | Out-Null }
+    if (-not (Copy-Scheme $From $Guid $Name $Description)) { return $null }
+    foreach ($t in $Tune) {
+        & powercfg.exe -setacvalueindex $Guid $t[0] $t[1] $t[2] 2>&1 | Out-Null
+        & powercfg.exe -setdcvalueindex $Guid $t[0] $t[1] $t[2] 2>&1 | Out-Null
     }
+    if (Set-ActiveScheme $Guid) { return 'created' }
+    return $null
+}
+
+function Action-HighPerf {
+    # The built-in plan whenever Windows lets us use it.
+    if (Set-ActiveScheme $GUID_HIGHPERF) {
+        Write-Ok 'מצב ביצועים גבוהים הופעל.'
+        return
+    }
+    # Some laptops (Modern Standby) and trimmed OEM images refuse it. A copy
+    # under this tool's own id stands in: of High Performance when it exists
+    # but will not activate, otherwise Balanced with the processor held at full
+    # speed while plugged in.
+    if (Test-Scheme $GUID_HIGHPERF) {
+        $r = Use-OwnScheme $GUID_CS_HIGH $GUID_HIGHPERF 'High Performance (Csharf)' 'ביצועים גבוהים - Csharf'
+    } else {
+        $r = Use-OwnScheme $GUID_CS_HIGH $GUID_BALANCED 'High Performance (Csharf)' 'ביצועים גבוהים - Csharf' `
+                           -Tune @(,@('SUB_PROCESSOR','PROCTHROTTLEMIN',100))
+    }
+    if ($r) { Write-Ok 'מצב ביצועים גבוהים הופעל (סכימה מותאמת, כי המחשב חוסם את הרגילה).' }
+    else    { Write-Err 'לא הצלחתי להפעיל מצב ביצועים גבוהים במחשב הזה.' }
 }
 
 function Action-UltraPerf {
-    Write-Log 'מנסה להפעיל את סכימת Ultimate Performance הרשמית...'
-    & powercfg -duplicatescheme $GUID_ULTIMATE 2>&1 | Out-Null
-    & powercfg /setactive $GUID_ULTIMATE 2>&1 | Out-Null
-
-    if ((Get-ActiveScheme).Guid -eq $GUID_ULTIMATE) {
-        Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה רשמית).'
+    # The official plan: Windows keeps Ultimate Performance as a hidden
+    # template, and copying it is the documented way to turn it on. Versions
+    # before 2.1 made the copy and then tried to activate the template itself,
+    # which never works - so the official plan was never actually used.
+    Write-Log 'מנסה להפעיל את הסכימה הרשמית של Windows...'
+    $r = Use-OwnScheme $GUID_CS_ULT $GUID_ULTIMATE 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf'
+    if ($r) {
+        Write-Ok 'מצב ביצועים אולטימטיביים הופעל.'
         return
     }
 
-    # Fallback: Home / battery-powered devices hide the Ultimate scheme.
-    # Clone High Performance and push it to Ultimate-equivalent settings.
-    Write-Warn 'הסכימה הרשמית לא זמינה במהדורה הזו - יוצר סכימה מותאמת.'
-    $out = (& powercfg -duplicatescheme $GUID_HIGHPERF 2>$null) -join ' '
-    if ($out -match $RX_GUID) {
-        $new = $Matches[1]
-    } else {
-        Write-Err 'שכפול סכימת הביצועים הגבוהים נכשל.'
-        return
-    }
-
-    & powercfg -changename $new 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - מותאם' 2>&1 | Out-Null
-    foreach ($p in @(
+    # Home editions and Modern Standby laptops block the template. Build an
+    # equivalent from High Performance (or Balanced, where that is missing).
+    Write-Warn 'המחשב חוסם את הסכימה הרשמית - בונה סכימה מקבילה.'
+    $base = if (Test-Scheme $GUID_HIGHPERF) { $GUID_HIGHPERF } else { $GUID_BALANCED }
+    $r = Use-OwnScheme $GUID_CS_ULT $base 'Ultimate Performance (Csharf)' 'ביצועים אולטימטיביים - Csharf' -Tune @(
         @('SUB_PROCESSOR','PROCTHROTTLEMIN',100),
         @('SUB_PROCESSOR','PROCTHROTTLEMAX',100),
         @('SUB_PROCESSOR','IDLEDISABLE',1),
         @('SUB_DISK','DISKIDLE',0),
         @('SUB_SLEEP','STANDBYIDLE',0),
         @('SUB_VIDEO','VIDEOIDLE',0)
-    )) {
-        & powercfg -setacvalueindex $new $p[0] $p[1] $p[2] 2>&1 | Out-Null
-        & powercfg -setdcvalueindex $new $p[0] $p[1] $p[2] 2>&1 | Out-Null
-    }
-    & powercfg /setactive $new 2>&1 | Out-Null
+    )
+    if ($r) { Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה מקבילה).' }
+    else    { Write-Err 'לא הצלחתי להפעיל מצב ביצועים אולטימטיביים במחשב הזה.' }
+}
 
-    if ((Get-ActiveScheme).Guid -eq $new) {
-        Write-Ok 'מצב ביצועים אולטימטיביים הופעל (סכימה מותאמת).'
-    } else {
-        Write-Err 'הפעלת הסכימה המותאמת נכשלה.'
+function Get-LeftoverSchemes {
+    # Plans this tool created and no longer needs. Read from the registry,
+    # because `powercfg /list` hides most plans on Modern Standby laptops.
+    #   - its own two fixed ids
+    #   - anything named or described as made by Csharf, by any version
+    #   - nameless copies of the stock High Performance / Ultimate plans: what
+    #     `powercfg -duplicatescheme` without a destination leaves behind,
+    #     which every version before 2.1 did on every click
+    # Never a built-in plan, never the active one, never a plan someone named
+    # themselves.
+    param([string]$Active)
+    $builtin = @($GUID_BALANCED, $GUID_HIGHPERF, $GUID_SAVER, $GUID_ULTIMATE)
+    foreach ($s in (Get-AllSchemes)) {
+        if ($builtin -contains $s.Guid -or $s.Guid -eq $Active) { continue }
+        $ours = ($s.Guid -eq $GUID_CS_ULT) -or ($s.Guid -eq $GUID_CS_HIGH) -or
+                ($s.Name -match 'Csharf') -or
+                ($s.Description -match '^ביצועים (אולטימטיביים|גבוהים) (- מותאם|\(מותאם\)|- Csharf)$')
+        $stockCopy = $s.Name -match '^@[^,]*powrprof\.dll,-\d+,(High performance|Ultimate Performance)$'
+        if ($ours -or $stockCopy) { $s }
     }
 }
 
 function Action-Balanced {
-    & powercfg /setactive $GUID_BALANCED 2>&1 | Out-Null
-    if ((Get-ActiveScheme).Guid -ne $GUID_BALANCED) {
+    if (-not (Set-ActiveScheme $GUID_BALANCED)) {
         Write-Err 'המעבר למצב מאוזן נכשל.'
         return
     }
     Write-Ok 'המערכת חזרה למצב מאוזן.'
 
-    # Clean up leftover Ultimate clones. Only removes duplicates - never the
-    # active scheme, and never one of the four built-in GUIDs.
-    $builtin = @($GUID_BALANCED, $GUID_HIGHPERF, $GUID_SAVER, $GUID_ULTIMATE)
-    $active  = (Get-ActiveScheme).Guid
     $removed = 0
-    foreach ($line in (& powercfg /list 2>$null)) {
-        if ($line -match $RX_GUID) { $g = $Matches[1] } else { continue }
-        if ($g -eq $active -or $builtin -contains $g) { continue }
-        if ($line -match 'Ultimate|אולטימ|Csharf') {
-            & powercfg /delete $g 2>&1 | Out-Null
-            $removed++
-        }
+    foreach ($s in @(Get-LeftoverSchemes -Active $GUID_BALANCED)) {
+        Test-Stop
+        & powercfg.exe /delete $s.Guid 2>&1 | Out-Null
+        if (-not (Test-Scheme $s.Guid)) { $removed++ }
     }
-    if ($removed -gt 0) { Write-Ok "נמחקו $removed סכימות אולטרא שנוצרו בעבר." }
+    if ($removed -gt 0) { Write-Ok "נוקו $removed תוכניות חשמל כפולות שנשארו מהפעלות קודמות." }
 }
 
 function Action-HibernateOff {
@@ -536,47 +870,115 @@ function Action-RestorePoint {
         return
     }
     Write-Log 'יוצר נקודת שחזור... (עשוי לקחת דקה)'
-    try {
-        Enable-ComputerRestore -Drive 'C:\' -ErrorAction SilentlyContinue
-        Checkpoint-Computer -Description 'Csharf All-In-One' `
-                            -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
+    # Runs on a second thread: Checkpoint-Computer is a cmdlet, not a process,
+    # so Start-Tool cannot keep the window alive while it works.
+    #
+    # Two traps the versions before 2.1 fell into:
+    #  - Windows silently skips the request when a restore point was made in
+    #    the last 24 hours. Checkpoint-Computer then only writes a warning, no
+    #    error, and the tool reported "created". So the newest point is
+    #    compared before and after, and the 24-hour limit is lifted for this
+    #    one request (the documented SystemRestorePointCreationFrequency
+    #    value) and put back exactly as it was.
+    #  - The drive was hard-coded as C:.
+    $res = Invoke-Background -Arguments @("$env:SystemDrive\") -Script {
+        param($Drive)
+        $key  = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $name = 'SystemRestorePointCreationFrequency'
+        $had  = $null
+        try { $had = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction Stop).$name } catch { }
+        $newest = { @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue) |
+                    Sort-Object SequenceNumber | Select-Object -Last 1 -ExpandProperty SequenceNumber }
+        $before = & $newest
+        $err    = ''
+        try {
+            Enable-ComputerRestore -Drive $Drive -ErrorAction SilentlyContinue
+            Set-ItemProperty -LiteralPath $key -Name $name -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Checkpoint-Computer -Description 'Csharf' -RestorePointType 'MODIFY_SETTINGS' `
+                                -ErrorAction Stop -WarningAction SilentlyContinue
+        } catch {
+            $err = $_.Exception.Message
+        } finally {
+            if ($null -eq $had) { Remove-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -LiteralPath $key -Name $name -Value $had -Type DWord -ErrorAction SilentlyContinue }
+        }
+        $after = & $newest
+        [PSCustomObject]@{ Created = ($null -ne $after -and $after -ne $before); Error = $err }
+    }
+    $res = @($res) | Select-Object -Last 1
+    if ($res -and $res.Created) {
         Write-Ok 'נקודת שחזור נוצרה.'
-    } catch {
-        Write-Warn 'לא נוצרה נקודת שחזור (שחזור מערכת כבוי, או שכבר נוצרה נקודה ב-24 השעות האחרונות).'
+    } elseif ($res -and $res.Error) {
+        Write-Warn "לא נוצרה נקודת שחזור: $($res.Error)"
+    } else {
+        Write-Warn 'לא נוצרה נקודת שחזור. ייתכן ששחזור המערכת כבוי במחשב הזה או חסום על ידי מדיניות.'
     }
 }
 
-function Action-Cleanup {
-    $msg = @(
-        'הפעולה תמחק קבצים זמניים, תרוקן את סל המיחזור,'
-        'ותנקה קבצי עדכונים ישנים של Windows.'
-        ''
-        'הקבצים שיימחקו לא ניתנים לשחזור. להמשיך?'
-    ) -join [Environment]::NewLine
+function Confirm-Action {
+    # Yes/No question, "No" preselected, laid out right to left.
+    param([string[]]$Lines, [string]$Title)
     $ans = [System.Windows.Forms.MessageBox]::Show(
-        $msg, 'אזהרה - פינוי שטח',
+        $form, ($Lines -join [Environment]::NewLine), $Title,
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Warning,
         [System.Windows.Forms.MessageBoxDefaultButton]::Button2,
         [System.Windows.Forms.MessageBoxOptions]::RtlReading -bor
         [System.Windows.Forms.MessageBoxOptions]::RightAlign)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+    return ($ans -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+function Action-Cleanup {
+    if (-not (Confirm-Action -Title 'אזהרה - פינוי שטח' -Lines @(
+        'הפעולה תמחק:'
+        '•  קבצים זמניים של Windows ושל התוכנות'
+        '•  את כל מה שנמצא בסל המיחזור'
+        '•  קבצי עדכונים ישנים, יומני התקנה ודוחות שגיאה'
+        ''
+        'הקבצים שיימחקו לא ניתנים לשחזור. להמשיך?'))) {
         Write-Warn 'הפעולה בוטלה.'
         return
     }
 
-    $before = Get-FreeSpaceBytes 'C'
+    # The previous Windows installation gets a question of its own. Removing
+    # it frees a lot of space, but it is also the only way back after a
+    # Windows upgrade - not something to take away inside "temporary files".
+    $winOld    = Join-Path $env:SystemDrive 'Windows.old'
+    $dropOld   = $false
+    if (Test-Path -LiteralPath $winOld) {
+        $dropOld = Confirm-Action -Title 'התקנה קודמת של Windows' -Lines @(
+            'נמצאה במחשב התקנה קודמת של Windows (התיקייה Windows.old).'
+            ''
+            'מחיקתה מפנה הרבה מקום, אבל אחריה כבר אי אפשר'
+            'לחזור לגרסת Windows הקודמת.'
+            ''
+            'למחוק גם אותה?')
+    }
+
+    $sys    = ([string]$env:SystemDrive).TrimEnd(':')
+    $before = Get-FreeSpaceBytes $sys
 
     Write-Log 'מסמן קטגוריות לניקוי עבור cleanmgr...'
+    # Left out on purpose:
+    #  - "User file versions" is File History - the user's own backup copies.
+    #  - "Previous Installations" only when the user agreed above.
     $caches = @(
         'Active Setup Temp Folders','BranchCache','Downloaded Program Files',
         'Internet Cache Files','Memory Dump Files','Old ChkDsk Files',
-        'Previous Installations','Recycle Bin','Service Pack Cleanup',
+        'Recycle Bin','Service Pack Cleanup',
         'Setup Log Files','System error memory dump files',
         'System error minidump files','Temporary Files','Update Cleanup',
-        'User file versions','Windows Error Reporting Files'
+        'Windows Error Reporting Files'
     )
+    if ($dropOld) { $caches += 'Previous Installations' }
     $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
+    # Preset 1 is shared with every earlier run, and versions before 2.1 also
+    # ticked "Previous Installations" and "User file versions". Clear the
+    # whole preset first, so it holds exactly the list above and nothing a
+    # previous run left switched on.
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-ItemProperty -LiteralPath $_.PSPath -Name 'StateFlags0001' -ErrorAction SilentlyContinue
+    }
     foreach ($c in $caches) {
         $p = Join-Path $root $c
         if (Test-Path -LiteralPath $p) {
@@ -594,9 +996,15 @@ function Action-Cleanup {
 
     Write-Log 'מנקה תיקיות זמניות...'
     $freed = 0
-    $freed += Clear-FolderContents $env:TEMP
-    $freed += Clear-FolderContents 'C:\Windows\Temp'
-    $freed += Clear-FolderContents (Join-Path $env:LOCALAPPDATA 'Temp')
+    $temps = @($env:TEMP, (Join-Path $env:SystemRoot 'Temp'), (Join-Path $env:LOCALAPPDATA 'Temp')) |
+             Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+             ForEach-Object { (Resolve-Path -LiteralPath $_).ProviderPath.TrimEnd('\') } |
+             Select-Object -Unique
+    foreach ($t in $temps) {
+        # A temp folder sitting at the root of a drive would be the whole drive.
+        if ($t -match '^[A-Za-z]:$') { continue }
+        $freed += Clear-FolderContents $t
+    }
     Write-Ok ("תיקיות זמניות נוקו ({0}). קבצים בשימוש דולגו." -f (Format-Size $freed))
 
     # Clear-RecycleBin needs PS 5.0; fall back to the raw folder on older hosts.
@@ -619,7 +1027,7 @@ function Action-Cleanup {
     elseif ($null -eq $dc)  { Write-Warn 'DISM נכשל - ממשיך.' }
     else                    { Write-Warn "DISM הסתיים עם קוד $dc." }
 
-    $after = Get-FreeSpaceBytes 'C'
+    $after = Get-FreeSpaceBytes $sys
     $delta = $after - $before
     if ($delta -gt 0) {
         Write-Ok ('סה"כ שוחרר: {0}   (פנוי כעת: {1})' -f (Format-Size $delta), (Format-Size $after))
@@ -634,7 +1042,8 @@ function Show-RebootCountdown {
     # later versions. Rebuilt here as a proper dialog.
     $dlg               = New-Object System.Windows.Forms.Form
     $dlg.Text          = 'הפעלה מחדש'
-    $dlg.Size          = New-Object System.Drawing.Size(430, 190)
+    $dlg.AutoScaleMode = 'None'
+    $dlg.ClientSize    = New-Object System.Drawing.Size((S 420), (S 150))
     $dlg.StartPosition = 'CenterParent'
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox   = $false
@@ -654,7 +1063,7 @@ function Show-RebootCountdown {
     $btn               = New-Object System.Windows.Forms.Button
     $btn.Text          = 'ביטול ההפעלה מחדש'
     $btn.Dock          = 'Bottom'
-    $btn.Height        = 42
+    $btn.Height        = S 42
     $btn.FlatStyle     = 'Flat'
     $btn.BackColor     = $C_BTN
     $btn.ForeColor     = $C_WARN
@@ -704,6 +1113,12 @@ function Action-UpgradePro {
         Write-Ok "מערכת ההפעלה כבר במהדורת Pro ($($ed.EditionID))."
         return
     }
+    # The generic key moves Home to Pro, nothing else. On Education or
+    # Enterprise it would be a step down, and Windows may well go along with it.
+    if ($ed.EditionID -notmatch '^Core') {
+        Write-Warn "הפעולה מיועדת למהדורת Home בלבד. המהדורה במחשב הזה: $($ed.EditionID). לא בוצע שינוי."
+        return
+    }
     # v1 simply ran changepk.exe and let it report its own failure. Keep that
     # behaviour - resolve a real path when we can, but never refuse to try.
     $changepk = Resolve-SystemExe 'changepk.exe'
@@ -712,8 +1127,8 @@ function Action-UpgradePro {
         $changepk = 'changepk.exe'
     }
 
-    $msg = @(
-        "המהדורה הנוכחית: $($ed.ProductName)  [$($ed.EditionID)]"
+    if (-not (Confirm-Action -Title 'שדרוג מהדורה ל-Pro' -Lines @(
+        "המהדורה הנוכחית: $($ed.ProductName)  ·  $($ed.EditionID)"
         ''
         'הפעולה תשנה את מהדורת Windows ל-Pro ותפעיל את המחשב מחדש.'
         'שמור וסגור את כל המסמכים הפתוחים לפני שתמשיך.'
@@ -721,38 +1136,40 @@ function Action-UpgradePro {
         'שים לב: שינוי המהדורה אינו הפעלה (Activation).'
         'לאחר ההפעלה מחדש עדיין יידרש רישיון Pro תקף.'
         ''
-        'להמשיך?'
-    ) -join [Environment]::NewLine
-    $ans = [System.Windows.Forms.MessageBox]::Show(
-        $msg, 'שדרוג מהדורה ל-Pro',
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning,
-        [System.Windows.Forms.MessageBoxDefaultButton]::Button2,
-        [System.Windows.Forms.MessageBoxOptions]::RtlReading -bor
-        [System.Windows.Forms.MessageBoxOptions]::RightAlign)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) {
+        'להמשיך?'))) {
         Write-Warn 'הפעולה בוטלה.'
         return
     }
 
+    # changepk needs these two services able to run. Only one that is switched
+    # off gets touched, and only for the duration of the change: versions
+    # before 2.1 set both to "automatic" for good, which quietly undid anyone's
+    # deliberate choice to keep Windows Update off.
     Write-Log 'מכין את התשתית לשדרוג (הפעלת שירותים נדרשים)...'
+    $restore = @{}
     foreach ($svc in @('LicenseManager','wuauserv')) {
-        & sc.exe config $svc start= auto 2>&1 | Out-Null
+        $start = $null
+        try { $start = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -ErrorAction Stop).Start } catch { }
+        if ($start -eq 4) {
+            & sc.exe config $svc start= demand 2>&1 | Out-Null
+            $restore[$svc] = $true
+        }
         Start-Service -Name $svc -ErrorAction SilentlyContinue
     }
 
     Write-Log 'מריץ changepk.exe...'
-    # NOTE: kept on Start-Process -Wait rather than Start-Tool. changepk drives
-    # its own UI and a reboot; the window must not accept clicks meanwhile.
+    # Never stoppable half way (-NoStop), but the window stays responsive.
     # v2/v4 had `timeout /t 5` between changepk and the errorlevel check, which
     # reset ERRORLEVEL - so they always reported success. Fixed by reading the
     # process exit code directly.
-    $proc = Start-Process -FilePath $changepk `
-                          -ArgumentList '/productkey', $PRO_KEY `
-                          -Wait -PassThru -ErrorAction SilentlyContinue
-    if (-not $proc -or $proc.ExitCode -ne 0) {
-        $code = if ($proc) { $proc.ExitCode } else { 'n/a' }
-        Write-Err "שינוי המהדורה נכשל (קוד $code). ודא חיבור לאינטרנט ונסה שוב."
+    try {
+        $code = Start-Tool $changepk @('/productkey', $PRO_KEY) -NoStop
+    } finally {
+        foreach ($svc in $restore.Keys) { & sc.exe config $svc start= disabled 2>&1 | Out-Null }
+    }
+    if ($code -ne 0) {
+        $shown = if ($null -eq $code) { 'n/a' } else { $code }
+        Write-Err "שינוי המהדורה נכשל (קוד $shown). ודא חיבור לאינטרנט ונסה שוב."
         return
     }
 
@@ -874,7 +1291,12 @@ function Action-BatteryReport {
     if ((Test-Path -LiteralPath $out) -and $code -eq 0) {
         Write-Ok "הדוח נשמר בשולחן העבודה: battery-report.html"
         Write-Log 'חפש בדוח את DESIGN CAPACITY מול FULL CHARGE CAPACITY - היחס ביניהם הוא הבלאי.' $C_DIM
-        Start-Process $out -ErrorAction SilentlyContinue
+        # Through explorer.exe rather than opening the file directly. This
+        # process runs as administrator, and anything it opens would inherit
+        # that - a whole web browser with administrator rights. A new
+        # explorer.exe hands the file to the user's own, normal shell instead.
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') `
+                      -ArgumentList ('"{0}"' -f $out) -ErrorAction SilentlyContinue
     } else {
         Write-Warn 'לא הופק דוח. במחשב נייח ללא סוללה זה צפוי.'
     }
@@ -899,22 +1321,16 @@ function Action-ProductKey {
 }
 
 function Action-NetworkReset {
-    $msg = @(
+    if (-not (Confirm-Action -Title 'איפוס ערימת הרשת' -Lines @(
         'הפעולה תאפס את מחסנית הרשת: מטמון DNS, Winsock ו-TCP/IP.'
         ''
         'שימושי כשהאינטרנט מתנהג מוזר אחרי הסרת VPN או אנטי-וירוס.'
         'לאחר מכן תידרש הפעלה מחדש, וייתכן שיהיה צורך להתחבר שוב לרשת.'
         ''
-        'להמשיך?'
-    ) -join [Environment]::NewLine
-    $ans = [System.Windows.Forms.MessageBox]::Show(
-        $msg, 'איפוס ערימת הרשת',
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning,
-        [System.Windows.Forms.MessageBoxDefaultButton]::Button2,
-        [System.Windows.Forms.MessageBoxOptions]::RtlReading -bor
-        [System.Windows.Forms.MessageBoxOptions]::RightAlign)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { Write-Warn 'הפעולה בוטלה.'; return }
+        'שים לב: כתובת IP קבועה שהוגדרה ידנית תימחק, והחיבור יחזור'
+        'לקבל כתובת אוטומטית. אם הגדרת כתובת כזו, רשום אותה לפני כן.'
+        ''
+        'להמשיך?'))) { Write-Warn 'הפעולה בוטלה.'; return }
 
     foreach ($step in @(
         @('ipconfig.exe', @('/flushdns'),               'מטמון DNS נוקה'),
@@ -924,7 +1340,11 @@ function Action-NetworkReset {
         @('netsh.exe',    @('int','ipv6','reset'),      'מחסנית TCP/IPv6 אופסה')
     )) {
         $code = Start-Tool $step[0] $step[1]
-        if ($null -ne $code) { Write-Ok $step[2] } else { Write-Warn "נכשל: $($step[2])" }
+        # netsh often resets most of the stack and still returns 1 because one
+        # key was locked - "partly", not "done" and not "failed".
+        if     ($code -eq 0)    { Write-Ok $step[2] }
+        elseif ($null -eq $code) { Write-Err "נכשל: $($step[2])" }
+        else                    { Write-Warn "בוצע חלקית (קוד $code): $($step[2])" }
     }
     Write-Warn 'נדרשת הפעלה מחדש כדי שהאיפוס ייכנס לתוקף.'
 }
@@ -989,102 +1409,193 @@ function Action-RepairSystem {
 #  Build the menu
 # ============================================================================
 
-# Split by group, not by item count - a count-based split can strand a group
-# heading at the foot of one column with its buttons in the other.
-# Right-hand column first: that is where the eye lands in an RTL layout.
-$menuRight = @(
-    @{ Group = 'ביצועים וחשמל' }
-    @{ Text = 'מעבר למצב ביצועים גבוהים';                 Act = { Action-HighPerf } }
-    @{ Text = 'מעבר למצב ביצועים אולטימטיביים';           Act = { Action-UltraPerf } }
-    @{ Text = 'חזרה למצב ביצועים מאוזן';                  Act = { Action-Balanced } }
-    @{ Text = 'השבתת מצב תרדמה  (מחיקת hiberfil.sys)';    Act = { Action-HibernateOff } }
-    @{ Text = 'הפעלת מצב תרדמה מחדש';                     Act = { Action-HibernateOn } }
-    @{ Text = 'דוח בריאות סוללה';                         Act = { Action-BatteryReport } }
+$groups = @{
+    perf = @{ Title = 'ביצועים וחשמל'; Items = @(
+        @{ Text = 'מעבר למצב ביצועים גבוהים';                 Act = { Action-HighPerf } }
+        @{ Text = 'מעבר למצב ביצועים אולטימטיביים';           Act = { Action-UltraPerf } }
+        @{ Text = 'חזרה למצב ביצועים מאוזן';                  Act = { Action-Balanced } }
+        @{ Text = 'השבתת מצב תרדמה  (מחיקת hiberfil.sys)';    Act = { Action-HibernateOff } }
+        @{ Text = 'הפעלת מצב תרדמה מחדש';                     Act = { Action-HibernateOn } }
+        @{ Text = 'דוח בריאות סוללה';                         Act = { Action-BatteryReport } }
+    ) }
+    clean = @{ Title = 'ניקוי ושטח'; Items = @(
+        @{ Text = 'פינוי שטח וניקוי מערכת יסודי';             Act = { Action-Cleanup };  Hot = $true }
+        @{ Text = 'שחרור האחסון השמור של Windows';            Act = { Action-ReservedStorage } }
+        @{ Text = 'תיקון קבצי מערכת  (DISM + SFC)';           Act = { Action-RepairSystem } }
+    ) }
+    access = @{ Title = 'גישה מהירה וממשק'; Items = @(
+        @{ Text = 'קיצור לרשימת כל התוכנות';                  Act = { Action-Shortcut } }
+        @{ Text = 'קיצור ל-God Mode  (כל ההגדרות)';           Act = { Action-GodMode } }
+        @{ Text = 'תפריט ההקשר הישן  (Windows 11)';           Act = { Action-ClassicMenu } }
+        @{ Text = 'הצגת סיומות וקבצים מוסתרים';               Act = { Action-FileExtensions } }
+    ) }
+    net = @{ Title = 'רשת'; Items = @(
+        @{ Text = 'איפוס ערימת הרשת';                         Act = { Action-NetworkReset };  Hot = $true }
+        @{ Text = 'הצגת סיסמאות ה-Wi-Fi השמורות';             Act = { Action-WifiPasswords } }
+    ) }
+    sys = @{ Title = 'מערכת ורישוי'; Items = @(
+        @{ Text = 'יצירת נקודת שחזור';                        Act = { Action-RestorePoint } }
+        @{ Text = 'הצגת מפתח המוצר מהקושחה';                  Act = { Action-ProductKey } }
+        @{ Text = 'שדרוג מהדורה מ-Home ל-Pro';                Act = { Action-UpgradePro };  Hot = $true }
+    ) }
+}
 
-    @{ Group = 'ניקוי ושטח' }
-    @{ Text = 'פינוי שטח וניקוי מערכת יסודי';             Act = { Action-Cleanup };  Hot = $true }
-    @{ Text = 'שחרור האחסון השמור של Windows';            Act = { Action-ReservedStorage } }
-    @{ Text = 'תיקון קבצי מערכת  (DISM + SFC)';           Act = { Action-RepairSystem } }
-)
+# Columns are filled by group, never by item count - a count-based split can
+# strand a heading at the foot of one column with its buttons in the next.
+# The first column is the right-hand one: that is where an RTL reader starts.
+# Two columns when the screen is tall enough; three - a wider, shorter window -
+# when it is not, which is the usual 1080p laptop running at 150%.
+$layouts = @('perf,clean|access,net,sys', 'perf|clean,net|access,sys')
 
-$menuLeft = @(
-    @{ Group = 'גישה מהירה וממשק' }
-    @{ Text = 'קיצור לרשימת כל התוכנות';                  Act = { Action-Shortcut } }
-    @{ Text = 'קיצור ל-God Mode  (כל ההגדרות)';           Act = { Action-GodMode } }
-    @{ Text = 'תפריט ההקשר הישן  (Windows 11)';           Act = { Action-ClassicMenu } }
-    @{ Text = 'הצגת סיומות וקבצים מוסתרים';               Act = { Action-FileExtensions } }
+$H_HEAD   = S 26; $M_HEAD = S 10       # heading height, space above it
+$H_BTN    = S 36; $M_BTN  = S 4        # button height, space under it
+$HALF     = S 6
+$GAP      = 2 * $HALF                  # between columns; even, so it splits cleanly
+$PAD_TOP  = S 4
+$minCol   = S 300
+$maxText  = 0
+foreach ($g in $groups.Values) {
+    foreach ($it in $g.Items) {
+        $w = [System.Windows.Forms.TextRenderer]::MeasureText($it.Text, $F_UI).Width
+        if ($w -gt $maxText) { $maxText = $w }
+    }
+}
+# caption + inner padding on both sides + the flat border
+$colWidth = [Math]::Max($minCol, $maxText + (S 24) + (S 8))
 
-    @{ Group = 'רשת' }
-    @{ Text = 'איפוס ערימת הרשת';                         Act = { Action-NetworkReset };  Hot = $true }
-    @{ Text = 'הצגת סיסמאות ה-Wi-Fi השמורות';             Act = { Action-WifiPasswords } }
+function Get-ColumnHeight {
+    param([string[]]$Keys)
+    $h = 0
+    foreach ($k in $Keys) { $h += $H_HEAD + $M_HEAD + (S 2) + $groups[$k].Items.Count * ($H_BTN + $M_BTN) }
+    return $h
+}
 
-    @{ Group = 'מערכת ורישוי' }
-    @{ Text = 'יצירת נקודת שחזור';                        Act = { Action-RestorePoint } }
-    @{ Text = 'הצגת מפתח המוצר מהקושחה';                  Act = { Action-ProductKey } }
-    @{ Text = 'שדרוג מהדורה מ-Home ל-Pro';                Act = { Action-UpgradePro };  Hot = $true }
-)
+# Size of the window frame around the client area, for this display scale.
+$form.ClientSize = New-Object System.Drawing.Size(1000, 1000)
+$frameW = $form.Width  - 1000
+$frameH = $form.Height - 1000
 
-$colWidth = 344
+$wa      = $script:WorkArea
+$fixedH  = $H_TITLE + $H_STATUS + $H_BOTTOM
+$choice  = $null
+$fallback = $null
+foreach ($lay in $layouts) {
+    $cols  = $lay.Split('|')
+    $menuH = $PAD_TOP + (($cols | ForEach-Object { Get-ColumnHeight $_.Split(',') } | Measure-Object -Maximum).Maximum) + (S 8)
+    $menuW = $cols.Count * ($colWidth + $GAP) + 2 * ($PAD - $HALF)
+    $cand  = @{ Cols = $cols; MenuH = $menuH; MenuW = $menuW }
+    $fitsW = ($menuW + $frameW) -le $wa.Width
+    $fitsH = ($fixedH + $menuH + $H_LOGMIN + $frameH) -le $wa.Height
+    if ($fitsW -and $fitsH) { $choice = $cand; break }
+    if ($fitsW -and (-not $fallback -or $menuH -lt $fallback.MenuH)) { $fallback = $cand }
+}
+if (-not $choice) { $choice = if ($fallback) { $fallback } else { @{ Cols = $layouts[0].Split('|'); MenuH = 0; MenuW = 0 } } }
+if ($choice.MenuH -eq 0) {
+    $c = $choice.Cols
+    $choice.MenuH = $PAD_TOP + (($c | ForEach-Object { Get-ColumnHeight $_.Split(',') } | Measure-Object -Maximum).Maximum) + (S 8)
+    $choice.MenuW = $c.Count * ($colWidth + $GAP) + 2 * ($PAD - $HALF)
+}
 
-foreach ($pair in @(@{ Items = $menuRight; Panel = $pnlColR },
-                    @{ Items = $menuLeft;  Panel = $pnlColL })) {
-    $target = $pair.Panel
-    foreach ($item in $pair.Items) {
+# ---- the columns ------------------------------------------------------------
+$nCols                = $choice.Cols.Count
+$pnlBtns              = New-Object System.Windows.Forms.TableLayoutPanel
+$pnlBtns.Dock         = 'Top'
+$pnlBtns.Height       = $choice.MenuH
+$pnlBtns.ColumnCount  = $nCols
+$pnlBtns.RowCount     = 1
+$pnlBtns.Margin       = New-Object System.Windows.Forms.Padding(0)
+$pnlBtns.Padding      = New-Object System.Windows.Forms.Padding(($PAD - $HALF), $PAD_TOP, ($PAD - $HALF), 0)
+# Fixed widths, exactly one button plus the gap. Percent columns round to
+# whole pixels on their own and could end up a pixel narrower than the button,
+# clipping its far edge. In a wider window the spare room goes to the far
+# (left) side, as it should in a right-to-left layout.
+for ($i = 0; $i -lt $nCols; $i++) {
+    [void]$pnlBtns.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, ($colWidth + $GAP))))
+}
+[void]$pnlBtns.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$pnlMenu.Controls.Add($pnlBtns)
 
-        if ($item.ContainsKey('Group')) {
-            $h            = New-Object System.Windows.Forms.Label
-            $h.Text       = $item.Group
-            $h.Font       = $F_BOLD
-            $h.ForeColor  = $C_DIM
-            $h.Width      = $colWidth
-            $h.Height     = 26
-            $h.TextAlign  = 'BottomRight'
-            $h.Margin     = New-Object System.Windows.Forms.Padding(0, 8, 0, 2)
-            $target.Controls.Add($h)
-            continue
+for ($ci = 0; $ci -lt $nCols; $ci++) {
+    $col               = New-Object System.Windows.Forms.FlowLayoutPanel
+    $col.Dock          = 'Fill'
+    $col.FlowDirection = 'TopDown'
+    $col.WrapContents  = $false
+    $col.Margin        = New-Object System.Windows.Forms.Padding($HALF, 0, $HALF, 0)
+    $pnlBtns.Controls.Add($col, $ci, 0)
+
+    foreach ($key in $choice.Cols[$ci].Split(',')) {
+        $g            = $groups[$key]
+        $h            = New-Object System.Windows.Forms.Label
+        $h.Text       = $g.Title
+        $h.Font       = $F_BOLD
+        $h.ForeColor  = $C_DIM
+        $h.AutoSize   = $false
+        $h.Width      = $colWidth
+        $h.Height     = $H_HEAD
+        $h.TextAlign  = 'BottomLeft'      # = right edge under RightToLeft
+        $h.Margin     = New-Object System.Windows.Forms.Padding(0, $M_HEAD, 0, (S 2))
+        $col.Controls.Add($h)
+
+        foreach ($item in $g.Items) {
+            $b               = New-Object System.Windows.Forms.Button
+            $b.Text          = $item.Text
+            $b.Width         = $colWidth
+            $b.Height        = $H_BTN
+            $b.Margin        = New-Object System.Windows.Forms.Padding(0, 0, 0, $M_BTN)
+            $b.FlatStyle     = 'Flat'
+            $b.BackColor     = $C_BTN
+            $b.ForeColor     = if ($item.Hot) { $C_WARN } else { $C_FG }
+            $b.TextAlign     = 'MiddleLeft'   # = right edge under RightToLeft
+            $b.Padding       = New-Object System.Windows.Forms.Padding((S 12), 0, (S 12), 0)
+            $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(60,70,60)
+            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(48,56,48)
+            $b.Cursor        = 'Hand'
+
+            $title  = $item.Text
+            $action = $item.Act
+            $b.Add_Click({ Invoke-Action $title $action }.GetNewClosure())
+
+            $col.Controls.Add($b)
+            $script:MenuButtons.Add($b)
         }
-
-        $b               = New-Object System.Windows.Forms.Button
-        $b.Text          = $item.Text
-        $b.Width         = $colWidth
-        $b.Height        = 36
-        $b.Margin        = New-Object System.Windows.Forms.Padding(0, 0, 0, 4)
-        $b.FlatStyle     = 'Flat'
-        $b.BackColor     = $C_BTN
-        $b.ForeColor     = if ($item.Hot) { $C_WARN } else { $C_FG }
-        $b.TextAlign     = 'MiddleRight'
-        $b.Padding       = New-Object System.Windows.Forms.Padding(0, 0, 12, 0)
-        $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(60,70,60)
-        $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(48,56,48)
-        $b.Cursor        = 'Hand'
-
-        $title  = $item.Text
-        $action = $item.Act
-        $b.Add_Click({ Invoke-Action $title $action }.GetNewClosure())
-
-        $target.Controls.Add($b)
     }
 }
 
-$bExit               = New-Object System.Windows.Forms.Button
-$bExit.Text          = 'יציאה'
-$bExit.Dock          = 'Fill'
-$bExit.Height        = 34
-$bExit.FlatStyle     = 'Flat'
-$bExit.BackColor     = [System.Drawing.Color]::FromArgb(20,20,20)
-$bExit.ForeColor     = $C_DIM
-$bExit.TextAlign     = 'MiddleCenter'
-$bExit.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(60,70,60)
-$bExit.Cursor        = 'Hand'
-$bExit.Add_Click({ $form.Close() })
-$pnlExit.Controls.Add($bExit)
+# ---- window size and place --------------------------------------------------
+# The log row soaks up whatever height is left. On a screen too short for
+# even the smallest log, the menu row is cut down instead and scrolls.
+$clientW = [Math]::Max($choice.MenuW, (S 640))
+$clientW = [Math]::Min($clientW, $wa.Width - $frameW)
+$menuRow = $choice.MenuH
+$room    = $wa.Height - $frameH - $fixedH
+if ($menuRow + $H_LOGMIN -gt $room) { $menuRow = [Math]::Max((S 120), $room - $H_LOGMIN) }
+$logRow  = [Math]::Max($H_LOGMIN, [Math]::Min($H_LOG, $room - $menuRow))
+$root.RowStyles[2].Height = $menuRow
+$form.ClientSize  = New-Object System.Drawing.Size($clientW, ($fixedH + $menuRow + $logRow))
+$form.MinimumSize = New-Object System.Drawing.Size(
+    [Math]::Min($form.Width, $wa.Width),
+    [Math]::Min(($frameH + $fixedH + $menuRow + (S 60)), $wa.Height))
+$form.Location    = New-Object System.Drawing.Point(
+    ($wa.X + [Math]::Max(0, [int](($wa.Width  - $form.Width)  / 2))),
+    ($wa.Y + [Math]::Max(0, [int](($wa.Height - $form.Height) / 2))))
 
-# Second layer against the same problem Set-Busy's $bExit.Enabled guards
-# against: the title bar's own close button and Alt+F4 do not go through
-# $bExit at all, so a busy action would otherwise still be torn down under
-# them mid-run.
+# Closing while an action runs: an external tool can be stopped first,
+# anything else is simply waited for. Either way the window then closes by
+# itself, so the person's request is honoured rather than ignored.
 $form.Add_FormClosing({
-    if ($script:Busy) { $_.Cancel = $true }
+    if (-not $script:Busy) { return }
+    $_.Cancel = $true
+    if ($script:CloseAfter) { return }
+    if ($script:CanStop) {
+        if (Confirm-Action -Title 'Csharf' -Lines @('פעולה עדיין רצה.', '', 'לעצור אותה ולסגור את החלון?')) {
+            $script:CloseAfter    = $true
+            $script:StopRequested = $true
+            Update-ExitButton
+        }
+    } else {
+        $script:CloseAfter = $true
+        Write-Warn 'אי אפשר לעצור את הפעולה הזו באמצע. החלון ייסגר מעצמו כשהיא תסתיים.'
+    }
 })
 
 # ============================================================================
@@ -1092,11 +1603,15 @@ $form.Add_FormClosing({
 # ============================================================================
 
 $form.Add_Shown({
+    # Started from a hidden background process, the window does not always
+    # get the foreground on its own.
+    $form.Activate()
     Update-Status
-    Write-Log 'Csharf 2.0 - מוכן. הרצה כמנהל מערכת אושרה.' $C_FG
+    Write-Log "Csharf $CSHARF_VERSION - מוכן. הרצה כמנהל מערכת אושרה." $C_FG
 })
 [void]$form.ShowDialog()
 $form.Dispose()
+try { $script:Mutex.ReleaseMutex() } catch { }
 
 # The extracted copy in %TEMP% has served its purpose. PowerShell has already
 # read the whole script into memory, so deleting it here is safe.
