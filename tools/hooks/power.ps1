@@ -35,6 +35,14 @@ try {
     $n3 = N
     Check ($n3 -eq $n2) "Ultimate x3: plans $n2 -> $n3 (one copy, ever)"
     Check ((Get-ActiveScheme).Guid -eq $GUID_CS_ULT) "Ultimate is the active plan: $((Get-ActiveScheme).Guid)"
+    # current AC and DC index of one processor setting = the last two hex numbers
+    $q = { param($plan, $set) @([regex]::Matches(((& powercfg.exe /qh $plan SUB_PROCESSOR $set 2>$null) -join ' '), '0x[0-9a-fA-F]{8}') |
+             Select-Object -Last 2 | ForEach-Object { [Convert]::ToInt32($_.Value, 16) }) }
+    $idle = & $q $GUID_CS_ULT 'IDLEDISABLE'
+    Check ($idle.Count -eq 2 -and $idle[0] -eq 0 -and $idle[1] -eq 0) "processor idle states allowed on mains and battery (AC/DC $($idle -join '/'))"
+    $pmin = & $q $GUID_CS_ULT 'PROCTHROTTLEMIN'
+    $base = & $q $(if (Test-Scheme $GUID_HIGHPERF) { $GUID_HIGHPERF } else { $GUID_BALANCED }) 'PROCTHROTTLEMIN'
+    Check ($pmin.Count -eq 2 -and $pmin[0] -eq 100 -and $pmin[1] -eq $base[1]) "full speed on mains only: min CPU AC $($pmin[0])%, DC $($pmin[1])% = base plan's $($base[1])%"
     Check ((Get-SchemeLabel) -eq 'ביצועים אולטימטיביים') "status shows ultimate: $(Get-SchemeLabel)"
 
     Action-HighPerf

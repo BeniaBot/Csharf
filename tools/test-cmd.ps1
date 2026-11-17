@@ -82,6 +82,12 @@ try {
     $rc = Run ':HIGHPERF';  Check ($rc -eq 10 -and (Plans) -eq $n0)  "HIGHPERF again -> no new plan ($n0 -> $(Plans))"
 
     $rc = Run ':ULTRAPERF'; Check ($rc -eq 10 -and (Active) -eq $CSU) "ULTRAPERF -> code $rc, active $(Active)"
+    $q = { param($plan, $set) @([regex]::Matches(((cmd /c "powercfg /qh $plan SUB_PROCESSOR $set 2>nul") -join ' '), '0x[0-9a-fA-F]{8}') |
+             Select-Object -Last 2 | ForEach-Object { [Convert]::ToInt32($_.Value, 16) }) }
+    $idle = & $q $CSU 'IDLEDISABLE'
+    Check ($idle.Count -eq 2 -and $idle[0] -eq 0 -and $idle[1] -eq 0) "processor idle states allowed (AC/DC $($idle -join '/'))"
+    $pmin = & $q $CSU 'PROCTHROTTLEMIN'; $base = & $q $GH 'PROCTHROTTLEMIN'
+    Check ($pmin[0] -eq 100 -and $pmin[1] -eq $base[1]) "full speed on mains only: min CPU AC $($pmin[0])%, DC $($pmin[1])% = base $($base[1])%"
     $n1 = Plans
     $rc = Run ':ULTRAPERF'; $rc2 = Run ':ULTRAPERF'
     Check ($rc -eq 10 -and $rc2 -eq 10 -and (Plans) -eq $n1) "ULTRAPERF x3 -> one copy ($n1 -> $(Plans))"

@@ -151,11 +151,18 @@ echo  ...„Œ‰—Ž „Ž‰‹‘ „… - „†„ ™‡Ž „Ž…‘‡ š‰Ž™˜„ „Ž‰‹‘„
 powercfg -duplicatescheme 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 || powercfg -duplicatescheme 381b4222-f694-41f0-9685-ff5bb260df2e c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :HASPLAN c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 || goto :END_FAIL
+rem Full speed on mains power only (setacvalueindex); on battery the plan
+rem keeps the values of the plan it was copied from.
 powercfg -setacvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_PROCESSOR PROCTHROTTLEMIN 100 >nul 2>&1
 powercfg -setacvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_PROCESSOR PROCTHROTTLEMAX 100 >nul 2>&1
 powercfg -setacvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_DISK DISKIDLE 0 >nul 2>&1
+powercfg -setacvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_SLEEP STANDBYIDLE 0 >nul 2>&1
 :ULT_NAME
 powercfg -changename c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 "Ultimate Performance (Csharf)" "Csharf" >nul 2>&1
+rem Processor idle states stay on: a CPU that never rests runs hot and leaves
+rem no thermal room for turbo. (The GUI's first 2.1 build switched them off.)
+powercfg -setacvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_PROCESSOR IDLEDISABLE 0 >nul 2>&1
+powercfg -setdcvalueindex c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 SUB_PROCESSOR IDLEDISABLE 0 >nul 2>&1
 powercfg /setactive c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 >nul 2>&1
 call :ISACTIVE c54a2f10-7e1b-4d6a-9b3e-5c0a1e2f0001 && goto :END_OK
 goto :END_FAIL

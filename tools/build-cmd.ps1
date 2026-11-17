@@ -314,11 +314,18 @@ E 'הסכימה הרשמית חסומה במחשב הזה - בונה סכימה 
 A ("powercfg -duplicatescheme $GH $CSU >nul 2>&1")
 A ("call :HASPLAN $CSU || powercfg -duplicatescheme $GB $CSU >nul 2>&1")
 A ("call :HASPLAN $CSU || goto :END_FAIL")
+A 'rem Full speed on mains power only (setacvalueindex); on battery the plan'
+A 'rem keeps the values of the plan it was copied from.'
 A ("powercfg -setacvalueindex $CSU SUB_PROCESSOR PROCTHROTTLEMIN 100 >nul 2>&1")
 A ("powercfg -setacvalueindex $CSU SUB_PROCESSOR PROCTHROTTLEMAX 100 >nul 2>&1")
 A ("powercfg -setacvalueindex $CSU SUB_DISK DISKIDLE 0 >nul 2>&1")
+A ("powercfg -setacvalueindex $CSU SUB_SLEEP STANDBYIDLE 0 >nul 2>&1")
 A ':ULT_NAME'
 A ("powercfg -changename $CSU `"Ultimate Performance (Csharf)`" `"Csharf`" >nul 2>&1")
+A 'rem Processor idle states stay on: a CPU that never rests runs hot and leaves'
+A 'rem no thermal room for turbo. (The GUI''s first 2.1 build switched them off.)'
+A ("powercfg -setacvalueindex $CSU SUB_PROCESSOR IDLEDISABLE 0 >nul 2>&1")
+A ("powercfg -setdcvalueindex $CSU SUB_PROCESSOR IDLEDISABLE 0 >nul 2>&1")
 A ("powercfg /setactive $CSU >nul 2>&1")
 A ("call :ISACTIVE $CSU && goto :END_OK")
 A 'goto :END_FAIL'
