@@ -422,6 +422,15 @@ set "SRKEY=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore"
 set "SRFREQ="
 for /f "tokens=3" %%v in ('reg query "%SRKEY%" /v SystemRestorePointCreationFrequency 2^>nul ^| findstr /I "SystemRestorePointCreationFrequency"') do set "SRFREQ=%%v"
 reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d 0 /f >nul 2>&1
+rem First PowerShell's own Checkpoint-Computer - the call the GUI edition
+rem makes, proven to work. The same request sent from VBS was answered
+rem "done" on a Windows 11 test machine without any restore point appearing.
+rem Exit codes: 0 a new point exists, 2 Windows made none, 1 failed.
+rem PowerShell blocked or missing gives anything else - then the VBS way.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$n = { @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber | Select-Object -Last 1).SequenceNumber }; $b = & $n; try { Enable-ComputerRestore -Drive ($env:SystemDrive + '\') -ErrorAction SilentlyContinue; Checkpoint-Computer -Description 'Csharf' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningAction SilentlyContinue } catch { exit 1 }; $a = & $n; if ($a -and $a -ne $b) { exit 0 } else { exit 2 }" >nul 2>&1
+set "RP_RC=%errorlevel%"
+if "%RP_RC%"=="0" goto :RP_END
+if "%RP_RC%"=="2" goto :RP_END
 set "vbsFile=%temp%\csharf_restore.vbs"
 > "%vbsFile%" echo On Error Resume Next
 >> "%vbsFile%" echo Set sr = GetObject^("winmgmts:\\.\root\default:SystemRestore"^)
@@ -444,6 +453,7 @@ set "vbsFile=%temp%\csharf_restore.vbs"
 cscript //nologo "%vbsFile%" >nul 2>&1
 set "RP_RC=%errorlevel%"
 del "%vbsFile%" >nul 2>&1
+:RP_END
 if defined SRFREQ (reg add "%SRKEY%" /v SystemRestorePointCreationFrequency /t REG_DWORD /d %SRFREQ% /f >nul 2>&1) else reg delete "%SRKEY%" /v SystemRestorePointCreationFrequency /f >nul 2>&1
 if "%RP_RC%"=="0" goto :END_OK
 if "%RP_RC%"=="2" goto :RP_SKIPPED
