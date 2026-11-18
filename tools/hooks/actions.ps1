@@ -85,9 +85,14 @@ function Has([string]$Text, [string]$Mark) { return $Text.Contains($Mark) }
 # defined here would replace it for the product's own code too.
 function Get-ActivePlanGuid { if ((& powercfg.exe /getactivescheme) -match '([0-9a-fA-F-]{36})') { return $Matches[1].ToLower() } }
 function Get-Explorers {
-    $me = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    @(Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 -and $_.SessionId -ne $me })
+    # The user's shell: any explorer.exe outside session 0. When the test runs
+    # on the user's own desktop, that is this very session - so it is not
+    # excluded (it was, and the restart check failed there for no reason).
+    @(Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
 }
+# The shell itself is the oldest of them; a short-lived explorer.exe (the battery report opens
+# its file through one) must not count as a restart.
+function Get-ShellPid { (Get-Explorers | Sort-Object StartTime | Select-Object -First 1).Id }
 function Read-Lnk([string]$Path) { $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path); return @{ Target = $s.TargetPath; Args = $s.Arguments } }
 function Get-RecycleCount { try { return (New-Object -ComObject Shell.Application).NameSpace(10).Items().Count } catch { return -1 } }
 
@@ -149,6 +154,14 @@ else { Check $false 'God Mode: shortcut missing' }
 # Explorer settings - classic menu and file extensions, each there and back
 # ============================================================================
 $menuKey = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'
+if ((Get-BuildNumber) -lt 22000) {
+    # Windows 10 has the full menu already: the action must say so, ask
+    # nothing, write nothing and leave Explorer alone.
+    $shell0 = Get-ShellPid
+    $t = Run 'classic menu (Windows 10)' { Action-ClassicMenu } -Answers @($true)
+    Check ((Has $t $WARN) -and $script:Asked.Count -eq 0 -and -not (Test-Path -LiteralPath $menuKey)) 'classic menu on Windows 10: says "Windows 11 only", asks nothing, writes nothing'
+    Check ($shell0 -and (Get-ShellPid) -eq $shell0) 'classic menu on Windows 10: Explorer not restarted'
+} else {
 $ex0 = Get-Explorers
 Note ("explorer before: " + (($ex0 | ForEach-Object { "pid $($_.Id) $($_.UserName) session $($_.SessionId)" }) -join '; '))
 $t = Run 'classic menu on (restart explorer: yes)' { Action-ClassicMenu } -Answers @($true)
@@ -159,9 +172,11 @@ Check ((Has $t $OK) -and ($null -ne $dv) -and ($dv -eq '')) ("classic menu: defa
 Start-Sleep 3
 $ex1 = Get-Explorers
 Note ("explorer after: " + (($ex1 | ForEach-Object { "pid $($_.Id) $($_.UserName) session $($_.SessionId)" }) -join '; '))
-Check ($ex1.Count -ge 1 -and (@($ex1.Id) -join ',') -ne (@($ex0.Id) -join ',')) 'classic menu: Explorer restarted in the user session'
+$shellNew = Get-ShellPid
+Check ($shellNew -and $shellNew -ne ($ex0 | Sort-Object StartTime | Select-Object -First 1).Id) 'classic menu: Explorer restarted in the user session'
 $t = Run 'classic menu off (restart explorer: no)' { Action-ClassicMenu } -Answers @($false)
 Check ((Has $t $OK) -and -not (Test-Path -LiteralPath $menuKey)) 'classic menu: back to the Windows 11 menu, key removed'
+}
 
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 $b = Get-ItemProperty -LiteralPath $adv
